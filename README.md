@@ -8,7 +8,7 @@ FingerJoint-Cutter is a FreeCAD macro that carves interlocking finger joints bet
 
 
 <p>
-  <img src="doc/Drawer.png" alt="Drawer" width="80%">
+  <img src="doc/Drawer.png" alt="Drawer" width="80%" align="center">
 </p>
 
 ## Requirements
@@ -16,8 +16,8 @@ FingerJoint-Cutter is a FreeCAD macro that carves interlocking finger joints bet
 
 ## Installation
 1. Open FreeCAD and go to `Macro → Macros…`.
-2. Click `Create`, choose a name, and save.
-3. Copy and paste the contents of the file `box.py` into the macro editor, then save.
+2. Click `Create`, choose a name, click Ok.
+3. Copy and paste the contents of the file [box.py](box.py?plain=1) into the macro editor, then save.
 
 ## Usage
 
