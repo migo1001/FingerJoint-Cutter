@@ -7,8 +7,10 @@ FingerJoint-Cutter is a FreeCAD macro that carves interlocking finger joints bet
 - Packs projected faces into labeled layouts (e.g., `Layout_5mm_001`) grouped by detected material thicknesses.
 
 
-![Big drawer](doc/big-drawer.png)
-![Big drawer cut layout](doc/big-drawer-cut.jpg)
+<p float="left">
+  <img src="doc/big-drawer.png" alt="Big drawer" width="360">
+  <img src="doc/big-drawer-cut.jpg" alt="Big drawer cut layout" width="360">
+</p>
 
 ## Requirements
 - FreeCAD 1.0 (or newer).
