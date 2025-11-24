@@ -6,6 +6,10 @@ FingerJoint-Cutter is a FreeCAD macro that carves interlocking finger joints bet
 - Clones the selected container so the originals stay untouched and hides the source container automatically.
 - Packs projected faces into labeled layouts (e.g., `Layout_5mm_001`) grouped by detected material thicknesses.
 
+
+![Big drawer](doc/big drawer.png)
+![Big drawer cut layout](doc/big drawer cut.jpg)
+
 ## Requirements
 - FreeCAD 1.0 (or newer).
 
@@ -37,6 +41,3 @@ Tips:
 - Kerf trimming is applied to internal finger segments but not to the endpoints, preserving spacing along the joint.
 - Each part is projected to 2D, grouped by detected thickness, and placed onto shelves. Layouts are named `Layout_<thickness>mm_###`.
 - Packing uses a shelf algorithm with a heuristic sheet width of `sqrt(total_area * 1.5)`, leaving headroom for rotations. Every piece gets a 2 mm margin, and sheets are separated by 50 mm in the document for clarity.
-
-## Example
-![Big drawer cut layout](doc/big drawer cut.jpg)
