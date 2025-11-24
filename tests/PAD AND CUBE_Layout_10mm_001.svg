@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="155.04mm" height="157.04000000000002mm" viewBox="0 0 155.04 157.04000000000002" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<g id="Layout_10mm_001" transform="translate(-128.480000,155.520000) scale(1,-1)">
+<path id="Layout_10mm_001_f0000"  d="M 200.0 -2e-15 L 200.0 10.0 L 180.0675 10.0 L 180.0675 -2e-15 L 159.9325 0.0 L 159.9325 10.0 L 140.0 10.0 L 140.0 30.815345666666673 L 130.0 30.815345666666673 L 130.0 51.833191333333346 L 140.0 51.833191333333346 L 140.0 72.64853700000002 L 130.0 72.64853700000002 L 130.0 80.0 L 210.0 80.0 L 210.0 0.0 L 200.0 0.0 Z " stroke="#191919" stroke-width="0.7 px" style="stroke-width:0.7;stroke-miterlimit:4;stroke-dasharray:none;stroke-linecap:square;fill:#acb5bc;fill-opacity:1.0;fill-rule: evenodd"/>
+<path id="Layout_10mm_001_f0001"  d="M 212.00000000000003 10.0 L 212.0 30.95034566666667 L 222.00000000000003 30.95034566666667 L 222.00000000000003 51.69819133333334 L 212.0 51.69819133333334 L 212.00000000000003 72.648537 L 282.0 72.648537 L 282.0 49.70248211154329 A 15.0996 15.0996 0 0 1 282 19.5034L 282.0 10.0 L 258.7341666666667 10.0 L 258.7341666666667 -2e-15 L 235.26583333333338 0.0 L 235.26583333333335 10.0 L 212.00000000000003 10.0 Z " stroke="#191919" stroke-width="0.7 px" style="stroke-width:0.7;stroke-miterlimit:4;stroke-dasharray:none;stroke-linecap:square;fill:#acb5bc;fill-opacity:1.0;fill-rule: evenodd"/>
+<path id="Layout_10mm_001_f0002"  d="M 179.9325 84.0 L 179.9325 94.0 L 160.0675 94.0 L 160.0675 84.0 L 130.0 84.0 L 130.0 107.40083333333334 L 140.0 107.40083333333334 L 140.0 130.59916666666666 L 130.0 130.59916666666666 L 130.0 154.0 L 200.0 154.0 L 200.0 84.0 L 179.9325 84.0 Z " stroke="#191919" stroke-width="0.7 px" style="stroke-width:0.7;stroke-miterlimit:4;stroke-dasharray:none;stroke-linecap:square;fill:#acb5bc;fill-opacity:1.0;fill-rule: evenodd"/>
+<title>b'Layout_10mm_001'</title>
+</g>
+</svg>
