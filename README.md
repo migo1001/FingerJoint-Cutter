@@ -1,44 +1,72 @@
 # FingerJoint-Cutter
 
-FingerJoint-Cutter is a FreeCAD macro that carves interlocking finger joints between the solids inside a selected Part/App::Part container and then generates 2D projection layouts by sheet thickness for laser cutting.
-
-- Processes only visible solids, keeps per-pair intersections disjoint, and applies kerf symmetrically.
-- Clones the selected container so the originals stay untouched and hides the source container automatically.
-- Packs projected faces into labeled layouts (e.g., `Layout_5mm_001`) grouped by detected material thicknesses.
-
+FingerJoint-Cutter is a FreeCAD macro that carves interlocking finger joints between the solids inside a selected Part/App::Part container, then flattens and packs them into labeled layouts per detected material thickness for laser cutting.
 
 <p>
-  <img src="doc/Drawer.png" alt="Drawer" width="80%" align="center">
+  <img src="doc/Drawer.png" alt="Drawer example" width="80%" align="center">
 </p>
 
 ## Requirements
-- FreeCAD 1.0 (or newer).
+- FreeCAD 1.0 or newer (with PySide2/6 available).
 
 ## Installation
 1. Open FreeCAD and go to `Macro → Macros…`.
-2. Click `Create`, choose a name, click Ok.
-3. Copy and paste the contents of the file [box.py](box.py?plain=1) into the macro editor, then save.
+2. Click **Create**, choose a name, click **Ok**.
+3. Copy the contents of [box.py](box.py?plain=1) into the macro editor and save.
 
-## Usage
+## What it’s good for
+- Straight, plank-like solids from the Part workbench. Planks may have holes.
+- Orthogonal joints: finger generation is axis-aligned. Curved objects are not supported.
+- Multi-thickness projects: each thickness gets its own packed layout.
 
-The macro is designed to be used with objects generated in the Part workshop of FreeCAD, ie: mostly things that look like planks. These planks can have holes, but the macro is NOT designed to process curved objects.
+## Workflow
 
-1. Store the planks that need to be processed in a Part container. Finger cuts will be generated in all places that overlap between two visible planks.
-2. Select the container in the Model tree.
-3. Go to `Macro → Macros…`. Select the macro as saved, and press Execute. You can also use a keyboard shortcut.
-4. A dialog asks for:
-   - Kerf (laser width) in mm. Default is 0.135 mm.
-   - Minimum finger length in mm. Default is 30 mm.
-5. The macro clones the container, hides the original, applies finger joints to the clones, and creates packed projection layouts beside the model. Layout objects are named `Layout_<thickness>mm_###`.
-6. Select the layout object, go to "File - Export..." and export as DXF or SVG. The resulting file is ready to be sent to a laser cutter.
+### 1) Model your parts
+- Create a new document, switch to the Part workbench, and add a Part container.
+- Build each side as a solid that overlaps its neighbors where you want joints.
+- Keep solids valid and give them nonzero thickness.
+
+<p>
+  <img src="doc/step1.png" width="80%" align="center">
+</p>
 
 Tips:
-- Ensure solids have valid shapes and nonzero thickness; invalid or hidden parts are skipped.
-- After the macro finishes, you can export the generated layout objects to SVG/DXF from FreeCAD.
+- Hide any solid you do not want processed.
+- Processing order follows the tree order in the Model view; reorder there for different joint patterns.
 
-## Kerf, fingers, and layout ratios
-- Kerf matters because the laser burns away material. The default 0.135 mm value is split evenly (kerf/2) on both sides of every internal cut so parts stay centered rather than oversized on one face. If joints feel loose, reduce kerf; if they are too tight, increase it.
-- Finger length comes from the longest dimension of the overlap between two parts. The code prefers an odd finger count (alternating pattern) while keeping each finger at or above the requested minimum (30 mm by default). Cross-style intersections force exactly two fingers; other cases try the largest odd count that still meets the minimum, and fall back to three if none fit.
-- Kerf trimming is applied to internal finger segments but not to the endpoints, preserving spacing along the joint.
-- Each part is projected to 2D, grouped by detected thickness, and placed onto shelves. Layouts are named `Layout_<thickness>mm_###`.
-- Packing uses a shelf algorithm with a heuristic sheet width of `sqrt(total_area * 1.5)`, leaving headroom for rotations. Every piece gets a 2 mm margin, and sheets are separated by 50 mm in the document for clarity.
+### 2) Run the macro
+- Select the container.
+- Open `Macro → Macros…`, pick this macro, and click **Execute** (or use a shortcut).
+
+<p>
+  <img src="doc/step2.png" width="80%" align="center">
+</p>
+
+Parameters:
+- **Kerf (laser width)** in mm — default 0.135 mm is split kerf/2 per side of every internal cut. If joints are loose, decrease kerf; if too tight, increase it.
+- **Minimum finger length** in mm — the algorithm enforces at least three fingers per intersection; this value is a lower bound target.
+
+Cross-type intersections always yield exactly two fingers (one per part) so the assembly can slide together.
+
+### 3) Export layouts
+The macro will:
+- Clone the container (hiding the original).
+- Compute finger cuts across all intersections.
+- Generate 2D projections and pack them per thickness.
+
+<p>
+  <img src="doc/step3.png" width="80%" align="center">
+</p>
+
+To export: select the generated layout object (e.g., `Layout_5mm_001`) and use `File → Export…` to your cutter’s format.
+
+Tips:
+- Packing aims for a 3:2 aspect ratio, common for laser beds.
+- If multiple thicknesses exist, you get one layout per thickness.
+
+## Notes and troubleshooting
+- Only visible solids are processed; hidden parts are skipped.
+- Shapes must be valid solids; zero-thickness or invalid shapes are ignored.
+- Kerf is applied symmetrically to keep spacing consistent on both sides of each cut.
+- If you see missing joints, check for non-intersecting parts or invalid geometry.
+
