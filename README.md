@@ -70,3 +70,9 @@ Tips:
 - Kerf is applied symmetrically to keep spacing consistent on both sides of each cut.
 - If you see missing joints, check for non-intersecting parts or invalid geometry.
 
+## Alternatives
+- <a href=https://boxes.hackerspace-bamberg.de/>Boxes.py</a> is an Open Source box generator written in Python.
+- <a href=https://github.com/execuc/LCInterlocking/blob/master/docs/interlocking.md>LCInterlocking</a> is a FreeCAD add-on to generate finger-cut boxes.
+
+
+
