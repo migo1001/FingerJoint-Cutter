@@ -609,11 +609,11 @@ class ProjectionOrchestrator:
                     container=self.container,
                     thickness=thickness,
                     parts=group,
-                    offset=offset,
+                    offset=FreeCAD.Vector(offset),  # use a copy so later mutations don't affect placed layouts
                     progress=prog
                 )
                 height = builder.build()
-                offset.y -= height + LAYOUT_GAP
+                offset.y += height + LAYOUT_GAP
         finally:
             prog.finish()
 

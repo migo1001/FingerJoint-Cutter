@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg width="102.0mm" height="44.0mm" viewBox="0 0 102.0 44.0" xmlns="http://www.w3.org/2000/svg" version="1.1">
-<g id="Layout_5mm_001" transform="translate(-149.000000,43.000000) scale(1,-1)">
+<svg width="102.0mm" height="43.0mm" viewBox="0 0 102.0 43.0" xmlns="http://www.w3.org/2000/svg" version="1.1">
+<g id="Layout_5mm_001" transform="translate(-149.000000,42.000000) scale(1,-1)">
 <path id="Layout_5mm_001_f0000"  d="M 150.0 20.0 L 150.0 0.0 L 250.0 0.0 L 250.0 20.0 L 150.0 20.0 Z M 184.9325 12.0 L 184.9325 7.0 L 165.0 7.0 L 165.0 12.0 L 184.9325 12.0 Z M 225.0 12.0 L 225.0 7.0 L 205.0675 7.0 L 205.0675 12.0 L 225.0 12.0 Z " stroke="#191919" stroke-width="0.7 px" style="stroke-width:0.7;stroke-miterlimit:4;stroke-dasharray:none;stroke-linecap:square;fill:#acb5bc;fill-opacity:1.0;fill-rule: evenodd"/>
-<path id="Layout_5mm_001_f0001"  d="M 150.0 42.0 L 150.0 22.0 L 170.0675 22.0 L 170.0675 27.0 L 189.9325 27.0 L 189.9325 22.0 L 210.0 22.0 L 210.0 42.0 L 150.0 42.0 Z " stroke="#191919" stroke-width="0.7 px" style="stroke-width:0.7;stroke-miterlimit:4;stroke-dasharray:none;stroke-linecap:square;fill:#acb5bc;fill-opacity:1.0;fill-rule: evenodd"/>
+<path id="Layout_5mm_001_f0001"  d="M 150.0 41.0 L 150.0 21.0 L 170.0675 21.0 L 170.0675 26.0 L 189.9325 26.0 L 189.9325 21.0 L 210.0 21.0 L 210.0 41.0 L 150.0 41.0 Z " stroke="#191919" stroke-width="0.7 px" style="stroke-width:0.7;stroke-miterlimit:4;stroke-dasharray:none;stroke-linecap:square;fill:#acb5bc;fill-opacity:1.0;fill-rule: evenodd"/>
 <title>b'Layout_5mm_001'</title>
 </g>
 </svg>
