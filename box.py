@@ -63,7 +63,7 @@ except ImportError:
 DEFAULT_MIN_FINGER_LENGTH = 30.0   # mm
 DEFAULT_KERF_MM = 0.135            # mm
 GEOM_EPS = 1e-6
-PROJECTION_MARGIN = 2.0            # mm between packed items
+PROJECTION_MARGIN = 1.0            # mm between packed items
 LAYOUT_GAP = 50.0                  # mm between thickness groups
 PREFS_GROUP = "User parameter:BaseApp/Preferences/Macros/FingerJointCutter"
 PREF_KERF = "KerfMM"
