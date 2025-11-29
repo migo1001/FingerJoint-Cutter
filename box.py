@@ -900,7 +900,7 @@ class ThicknessSheetLayout:
 
     def _append_shelf(self, shelves: List[Dict[str, float]], height: float) -> Dict[str, float]:
         """Create a new shelf positioned below the previous one."""
-        base_y = shelves[-1]['y'] + shelves[-1]['height'] + self.margin if shelves else 0.0
+        base_y = shelves[-1]['y'] + shelves[-1]['height'] if shelves else 0.0
         shelf = {'y': base_y, 'height': height + self.margin, 'cursor': 0.0}
         shelves.append(shelf)
         return shelf
