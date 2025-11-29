@@ -63,8 +63,11 @@ except ImportError:
 DEFAULT_MIN_FINGER_LENGTH = 30.0   # mm
 DEFAULT_KERF_MM = 0.135            # mm
 GEOM_EPS = 1e-6
-PROJECTION_MARGIN = 2.0            # mm between packed items
+PROJECTION_MARGIN = 1.0            # mm between packed items
 LAYOUT_GAP = 50.0                  # mm between thickness groups
+PREFS_GROUP = "User parameter:BaseApp/Preferences/Macros/FingerJointCutter"
+PREF_KERF = "KerfMM"
+PREF_FINGER = "MinFingerLength"
 
 # Logging verbosity: 0 = silent, 1 = normal, 2 = verbose
 DEBUG_LEVEL = 1
@@ -140,6 +143,33 @@ def fail(msg: str,
     raise exc_cls(msg)
 
 
+def _load_saved_settings() -> Tuple[float, float]:
+    """Return persisted kerf and finger length, falling back to defaults."""
+    kerf = DEFAULT_KERF_MM
+    finger = DEFAULT_MIN_FINGER_LENGTH
+    try:
+        params = FreeCAD.ParamGet(PREFS_GROUP)
+        kerf = float(params.GetFloat(PREF_KERF, kerf))
+        finger = float(params.GetFloat(PREF_FINGER, finger))
+    except Exception:
+        log("Preferences unavailable; using defaults for kerf and finger length.", 'warning')
+        return kerf, finger
+
+    kerf = kerf if kerf >= 0.0 else DEFAULT_KERF_MM
+    finger = finger if finger >= 1.0 else DEFAULT_MIN_FINGER_LENGTH
+    return kerf, finger
+
+
+def _persist_settings(kerf: float, finger_length: float) -> None:
+    """Store kerf and finger length for reuse in future runs."""
+    try:
+        params = FreeCAD.ParamGet(PREFS_GROUP)
+        params.SetFloat(PREF_KERF, float(kerf))
+        params.SetFloat(PREF_FINGER, float(finger_length))
+    except Exception:
+        log("Failed to persist settings; defaults will be used next time.", 'warning')
+
+
 
 # =============================================================================
 # 3) Logging + vector helpers
@@ -173,17 +203,19 @@ class FingerJointDialog(QtWidgets.QDialog):
 
         form = QtWidgets.QFormLayout()
 
+        saved_kerf, saved_finger = _load_saved_settings()
+
         self.kerf_spin = QtWidgets.QDoubleSpinBox()
         self.kerf_spin.setRange(0.0, 5.0)
         self.kerf_spin.setDecimals(3)
-        self.kerf_spin.setValue(DEFAULT_KERF_MM)
+        self.kerf_spin.setValue(saved_kerf)
         self.kerf_spin.setSuffix(" mm")
         form.addRow("Kerf (laser width)", self.kerf_spin)
 
         self.finger_spin = QtWidgets.QDoubleSpinBox()
         self.finger_spin.setRange(1.0, 1000.0)
         self.finger_spin.setDecimals(2)
-        self.finger_spin.setValue(DEFAULT_MIN_FINGER_LENGTH)
+        self.finger_spin.setValue(saved_finger)
         self.finger_spin.setSuffix(" mm")
         form.addRow("Minimum finger length", self.finger_spin)
 
@@ -202,10 +234,10 @@ class FingerJointDialog(QtWidgets.QDialog):
         """Return the chosen global settings or None on cancellation."""
         if self.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return None
-        return GlobalSettings(
-            kerf=self.kerf_spin.value(),
-            finger_length=self.finger_spin.value()
-        )
+        kerf = self.kerf_spin.value()
+        finger_length = self.finger_spin.value()
+        _persist_settings(kerf, finger_length)
+        return GlobalSettings(kerf=kerf, finger_length=finger_length)
 
 
 # =============================================================================
