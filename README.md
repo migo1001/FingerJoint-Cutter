@@ -74,5 +74,7 @@ Tips:
 - <a href=https://boxes.hackerspace-bamberg.de/>Boxes.py</a> is an Open Source box generator written in Python.
 - <a href=https://github.com/execuc/LCInterlocking/blob/master/docs/interlocking.md>LCInterlocking</a> is a FreeCAD add-on to generate finger-cut boxes.
 
+## License
+FingerJoint-Cutter is free software released under the GNU General Public License v3.0 or later. See `LICENSE` for full terms.
 
 
