@@ -40,11 +40,11 @@ from dataclasses import dataclass
 
 # Qt (Qt6 → PySide6, fallback to PySide2)
 try:
-    from PySide6 import QtWidgets, QtCore, QtGui
+    from PySide6 import QtWidgets, QtCore
     FreeCAD.Console.PrintMessage("Successfully imported PySide6 (Qt6).\n")
 except ImportError:
     try:
-        from PySide2 import QtWidgets, QtCore, QtGui
+        from PySide2 import QtWidgets, QtCore
         FreeCAD.Console.PrintMessage("Successfully imported PySide2 (Qt5).\n")
     except ImportError:
         msg = (
