@@ -20,7 +20,7 @@ Table of contents:
   5) Geometry: Intersection + finger creation
   6) 2D projection/packing: ProjectionOrchestrator
   7) Progress helper
-  8) Orchestrator: FingerJointProcessor (refactored pipeline)
+  8) Orchestrator: FingerJointOrchestrator (refactored pipeline)
   9) Main entry
 """
 
@@ -65,14 +65,11 @@ DEFAULT_KERF_MM = 0.135            # mm
 GEOM_EPS = 1e-6
 PROJECTION_MARGIN = 1.0            # mm between packed items
 LAYOUT_GAP = 50.0                  # mm between thickness groups
+MIN_FINGER_COUNT = 3
+CROSS_JOINT_FINGER_COUNT = 2
 PREFS_GROUP = "User parameter:BaseApp/Preferences/Macros/FingerJointCutter"
 PREF_KERF = "KerfMM"
 PREF_FINGER = "MinFingerLength"
-
-# Logging verbosity: 0 = silent, 1 = normal, 2 = verbose
-DEBUG_LEVEL = 1
-
-
 
 
 @dataclass
@@ -110,7 +107,7 @@ def log(msg: str,
         end: str = '\n',
         exc_cls: Optional[type[FingerJointError]] = None,
         original: Optional[BaseException] = None) -> None:
-    """Console logging wrapper that escalates errors via fail()."""
+    """Console logging wrapper that never raises exceptions."""
     if isinstance(level, (int, float)):
         level = 'error' if level <= 0 else 'info'
     normalized = str(level).lower()
@@ -118,7 +115,7 @@ def log(msg: str,
         FreeCAD.Console.PrintWarning(f"{msg}{end}")
         return
     if normalized == 'error':
-        fail(msg, exc_cls or FingerJointError, original)
+        FreeCAD.Console.PrintError(f"{msg}{end}")
         return
     FreeCAD.Console.PrintMessage(f"{msg}{end}")
 
@@ -315,11 +312,10 @@ class Intersection:
         try:
             return self.part1.Shape.common(self.part2.Shape)
         except Part.OCCError as exc:
-            log(
+            fail(
                 f"Failed to compute pairwise intersection between '{self.part1.Label}' and '{self.part2.Label}'",
-                level='error',
-                exc_cls=IntersectionError,
-                original=exc
+                IntersectionError,
+                exc
             )
 
     def _trim_against_used_space(self,
@@ -332,11 +328,10 @@ class Intersection:
         try:
             trimmed = trimmed.cut(used_space)
         except Part.OCCError as exc:
-            log(
+            fail(
                 "Failed to subtract already used intersection volume",
-                level='error',
-                exc_cls=IntersectionError,
-                original=exc
+                IntersectionError,
+                exc
             )
 
         if trimmed.Volume < GEOM_EPS:
@@ -345,11 +340,10 @@ class Intersection:
         try:
             updated_space = used_space.fuse(trimmed)
         except Part.OCCError as exc:
-            log(
+            fail(
                 "Failed to accumulate used intersection volume",
-                level='error',
-                exc_cls=IntersectionError,
-                original=exc
+                IntersectionError,
+                exc
             )
         return trimmed, updated_space
 
@@ -378,10 +372,9 @@ class Intersection:
 
     def _colinear(self, edge_a: Part.Edge, edge_b: Part.Edge) -> bool:
         if len(edge_a.Vertexes) < 2 or len(edge_b.Vertexes) < 2:
-            log(
+            fail(
                 "Edges missing vertex data for colinearity test",
-                level='error',
-                exc_cls=IntersectionError
+                IntersectionError
             )
         p1a, p1b = edge_a.Vertexes[0].Point, edge_a.Vertexes[1].Point
         p2a, p2b = edge_b.Vertexes[0].Point, edge_b.Vertexes[1].Point
@@ -435,15 +428,15 @@ class Intersection:
 
     def _finger_count(self) -> int:
         if self.intersection_type == IntersectionType.CROSS:
-            return 2
+            return CROSS_JOINT_FINGER_COUNT
         minimum_length = max(1.0, self.finger_length)
         max_fingers = int(self.longest_edge_len / minimum_length)
         candidate = max_fingers if max_fingers % 2 == 1 else max_fingers - 1
-        while candidate >= 3 and (self.longest_edge_len / candidate) + GEOM_EPS < minimum_length:
+        while candidate >= MIN_FINGER_COUNT and (self.longest_edge_len / candidate) + GEOM_EPS < minimum_length:
             candidate -= 2
-        if candidate >= 3:
+        if candidate >= MIN_FINGER_COUNT:
             return candidate
-        fallback = 3
+        fallback = MIN_FINGER_COUNT
         actual = self.longest_edge_len / float(fallback)
         if actual + GEOM_EPS < minimum_length:
             part_label_1 = getattr(self.part1, "Label", self.part1.Name)
@@ -492,44 +485,13 @@ class Intersection:
         if not self._finger_boxes:
             return
         cut1, cut2 = self._split_cutters(self._finger_boxes)
-        self._apply_cut(part_shapes, self.part1.Name, cut1)
-        self._apply_cut(part_shapes, self.part2.Name, cut2)
+        BooleanCutter.apply(part_shapes, self.part1.Name, cut1)
+        BooleanCutter.apply(part_shapes, self.part2.Name, cut2)
 
     def _split_cutters(self, boxes: List[Part.Shape]) -> Tuple[Part.Compound, Part.Compound]:
         cut1 = Part.Compound([boxes[i] for i in range(1, len(boxes), 2)])
         cut2 = Part.Compound([boxes[i] for i in range(0, len(boxes), 2)])
         return cut1, cut2
-
-    def _apply_cut(self,
-                   part_shapes: Dict[str, Part.Shape],
-                   part_name: str,
-                   cutter: Part.Shape) -> None:
-        if cutter.isNull() or not cutter.isValid():
-            return
-        shape = part_shapes.get(part_name)
-        if shape is None:
-            log(f"[checkpoint] intersection_apply_missing_part: part={part_name}")
-            return
-        try:
-            result = shape.cut(cutter)
-        except Part.OCCError as exc:
-            log(
-                f"Boolean cut failed for part '{part_name}'",
-                level='error',
-                exc_cls=IntersectionError,
-                original=exc
-            )
-        if hasattr(result, "removeSplitter"):
-            try:
-                result = result.removeSplitter()
-            except Exception as exc:
-                log(
-                    f"removeSplitter failed for part '{part_name}'",
-                    level='error',
-                    exc_cls=DocumentUpdateError,
-                    original=exc
-                )
-        part_shapes[part_name] = self._largest_solid(result)
 
     @staticmethod
     def _axis_vector(index: int) -> FreeCAD.Vector:
@@ -551,6 +513,39 @@ class Intersection:
         if hasattr(out, "normalized"):
             return out.normalized()
         return out.multiply(1.0 / length)
+
+
+class BooleanCutter:
+    """Helper to apply boolean cutters to cloned part shapes."""
+
+    @staticmethod
+    def apply(part_shapes: Dict[str, Part.Shape],
+              part_name: str,
+              cutter: Part.Shape) -> None:
+        if cutter.isNull() or not cutter.isValid():
+            return
+        shape = part_shapes.get(part_name)
+        if shape is None:
+            log(f"[checkpoint] intersection_apply_missing_part: part={part_name}")
+            return
+        try:
+            result = shape.cut(cutter)
+        except Part.OCCError as exc:
+            fail(
+                f"Boolean cut failed for part '{part_name}'",
+                IntersectionError,
+                exc
+            )
+        if hasattr(result, "removeSplitter"):
+            try:
+                result = result.removeSplitter()
+            except Exception as exc:
+                fail(
+                    f"removeSplitter failed for part '{part_name}'",
+                    DocumentUpdateError,
+                    exc
+                )
+        part_shapes[part_name] = BooleanCutter._largest_solid(result)
 
     @staticmethod
     def _largest_solid(shape: Part.Shape) -> Part.Shape:
@@ -584,7 +579,7 @@ class ProjectionOrchestrator:
         self.doc = container.Document if container is not None else FreeCAD.ActiveDocument
         self.parts = parts or []
 
-    def generate(self) -> None:
+    def generate(self, progress: Optional["ProgressDialog"] = None) -> None:
         """Create projection layouts for every detected thickness in the container."""
         log('ProjectionOrchestrator: starting projection build.', 1)
         if self.container is None:
@@ -601,21 +596,30 @@ class ProjectionOrchestrator:
             return
 
         offset = self._starting_offset()
-        prog = ProgressScope(max(1, len(groups)), 'Projection Layouts')
+        local_progress = progress
+        owns_progress = False
+        if local_progress is None:
+            local_progress = ProgressDialog(max(1, len(groups)), 'Projection Layouts')
+            owns_progress = True
+        else:
+            local_progress.set_phase('Projection Layouts', max(1, len(groups)))
+
         try:
             for index, (thickness, group) in enumerate(groups):
-                prog.update(index, f'Projection sheet for {thickness:.1f} mm parts')
+                if local_progress:
+                    local_progress.update(index, f'Projection sheet for {thickness:.1f} mm parts')
                 builder = ThicknessSheetLayout(
                     container=self.container,
                     thickness=thickness,
                     parts=group,
                     offset=FreeCAD.Vector(offset),  # use a copy so later mutations don't affect placed layouts
-                    progress=prog
+                    progress=local_progress
                 )
                 height = builder.build()
                 offset.y += height + LAYOUT_GAP
         finally:
-            prog.finish()
+            if owns_progress and local_progress:
+                local_progress.finish()
 
         log('ProjectionOrchestrator: completed projection layouts.', 1)
 
@@ -646,6 +650,95 @@ class ProjectionOrchestrator:
         return offset
 
 
+class ShelfPacker:
+    """Simple shelf-packing algorithm for 2D projection shapes."""
+
+    def __init__(self, margin: float):
+        self.margin = margin
+
+    def pack(self,
+             items: List[Dict[str, Any]],
+             sheet_width: float) -> List[Part.Shape]:
+        shelves: List[Dict[str, float]] = []
+        placed_shapes: List[Part.Shape] = []
+        for item in items:
+            placed_shapes.append(self._place_item(item, shelves, sheet_width))
+        return placed_shapes
+
+    def _place_item(self,
+                    item: Dict[str, Any],
+                    shelves: List[Dict[str, float]],
+                    sheet_width: float) -> Part.Shape:
+        index, rotate = self._find_shelf_for_item(item, shelves, sheet_width)
+        if index is None:
+            rotate = self._rotation_for_new_shelf(item)
+            width, height = self._dimensions(item, rotate)
+            shelf = self._append_shelf(shelves, height)
+        else:
+            width, height = self._dimensions(item, rotate)
+            shelf = shelves[index]
+
+        shape = item['shape'].copy()
+        if rotate:
+            shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 90)
+
+        bbox = shape.BoundBox
+        move = FreeCAD.Vector(shelf['cursor'] - bbox.XMin, shelf['y'] - bbox.YMin, -bbox.ZMin)
+        shape.translate(move)
+        shelf['cursor'] += width + self.margin
+        return shape
+
+    def _find_shelf_for_item(self,
+                             item: Dict[str, Any],
+                             shelves: List[Dict[str, float]],
+                             sheet_width: float) -> Tuple[Optional[int], bool]:
+        """Locate the best shelf for an item, returning shelf index and rotation flag."""
+        best_index: Optional[int] = None
+        best_leftover = float('inf')
+        best_rotate = False
+
+        for index, shelf in enumerate(shelves):
+            for rotate in (False, True):
+                width, height = self._dimensions(item, rotate)
+                if not self._shelf_fits(shelf, width, height, sheet_width):
+                    continue
+                leftover = shelf['height'] - (height + self.margin)
+                if leftover < best_leftover:
+                    best_leftover = leftover
+                    best_index = index
+                    best_rotate = rotate
+        return best_index, best_rotate
+
+    @staticmethod
+    def _rotation_for_new_shelf(item: Dict[str, Any]) -> bool:
+        """Return True when the item should rotate to better fit a fresh shelf."""
+        return item['height'] > item['width']
+
+    def _append_shelf(self, shelves: List[Dict[str, float]], height: float) -> Dict[str, float]:
+        """Create a new shelf positioned below the previous one."""
+        base_y = shelves[-1]['y'] + shelves[-1]['height'] if shelves else 0.0
+        shelf = {'y': base_y, 'height': height + self.margin, 'cursor': 0.0}
+        shelves.append(shelf)
+        return shelf
+
+    @staticmethod
+    def _dimensions(item: Dict[str, Any], rotate: bool) -> Tuple[float, float]:
+        """Return item dimensions, swapping axes when rotation is requested."""
+        if rotate:
+            return item['height'], item['width']
+        return item['width'], item['height']
+
+    def _shelf_fits(self,
+                    shelf: Dict[str, float],
+                    width: float,
+                    height: float,
+                    sheet_width: float) -> bool:
+        """Return True when the provided item fits in the shelf."""
+        if height + self.margin > shelf['height']:
+            return False
+        return (shelf['cursor'] + width + self.margin) <= sheet_width
+
+
 class ThicknessSheetLayout:
     """Create and attach a packed projection layout for a single thickness value."""
 
@@ -654,7 +747,7 @@ class ThicknessSheetLayout:
                  thickness: float,
                  parts: List[FreeCAD.DocumentObject],
                  offset: FreeCAD.Vector,
-                 progress: 'ProgressScope'):
+                 progress: Optional["ProgressDialog"]):
         """Store the parameters needed to flatten and pack parts."""
         self.container = container
         self.doc = container.Document if container is not None else FreeCAD.ActiveDocument
@@ -756,22 +849,20 @@ class ThicknessSheetLayout:
         except ProjectionError:
             raise
         except Exception as exc:
-            log(
+            fail(
                 f"Unexpected failure computing rotation for '{label}'",
-                level='error',
-                exc_cls=ProjectionError,
-                original=exc
+                ProjectionError,
+                exc
             )
 
         transformed = face.copy()
         try:
             combined = obj.Placement.multiply(FreeCAD.Placement(FreeCAD.Vector(), rotation))
         except Exception as exc:
-            log(
+            fail(
                 f"Unable to combine placement and rotation for '{label}'",
-                level='error',
-                exc_cls=ProjectionError,
-                original=exc
+                ProjectionError,
+                exc
             )
 
         matrix = combined.toMatrix()
@@ -782,18 +873,16 @@ class ThicknessSheetLayout:
             try:
                 transformed = transformed.transformGeometry(matrix)
             except Exception as exc:
-                log(
+                fail(
                     f"Failed to transform face into XY plane for '{label}'",
-                    level='error',
-                    exc_cls=ProjectionError,
-                    original=exc
+                    ProjectionError,
+                    exc
                 )
         except Exception as exc:
-            log(
+            fail(
                 f"Failed to transform face into XY plane for '{label}'",
-                level='error',
-                exc_cls=ProjectionError,
-                original=exc
+                ProjectionError,
+                exc
             )
 
         return transformed
@@ -803,9 +892,9 @@ class ThicknessSheetLayout:
         try:
             normal = face.normalAt(0.5, 0.5)
         except Exception as exc:
-            log('Cannot evaluate face normal for projection', level='error', exc_cls=ProjectionError, original=exc)
+            fail('Cannot evaluate face normal for projection', ProjectionError, exc)
         if normal.Length <= self.tol:
-            log('Degenerate face encountered during projection', level='error', exc_cls=ProjectionError)
+            fail('Degenerate face encountered during projection', ProjectionError)
         return FreeCAD.Rotation(normal, FreeCAD.Vector(0, 0, 1))
 
     def _normalized_face(self, face: Part.Face) -> Part.Face:
@@ -824,7 +913,8 @@ class ThicknessSheetLayout:
             return None, 0.0
 
         sheet_width = self._sheet_width(total_area)
-        placed_shapes = self._place_items_on_shelves(items, sheet_width)
+        packer = ShelfPacker(self.margin)
+        placed_shapes = packer.pack(items, sheet_width)
         if not placed_shapes:
             log('ThicknessSheetLayout: no shapes were placed during packing.', 1)
             return None, 0.0
@@ -837,89 +927,6 @@ class ThicknessSheetLayout:
         compound.translate(self.offset)
         layout_height = compound.BoundBox.YLength if compound.isValid() else 0.0
         return compound, layout_height
-
-    def _place_items_on_shelves(self,
-                                items: List[Dict[str, Any]],
-                                sheet_width: float) -> List[Part.Shape]:
-        """Place ordered items onto shelves and return the positioned shapes."""
-        shelves: List[Dict[str, float]] = []
-        placed_shapes: List[Part.Shape] = []
-        for item in items:
-            placed_shapes.append(self._place_item(item, shelves, sheet_width))
-        return placed_shapes
-
-    def _place_item(self,
-                    item: Dict[str, Any],
-                    shelves: List[Dict[str, float]],
-                    sheet_width: float) -> Part.Shape:
-        """Place an item onto an existing shelf or a new shelf and return the shape."""
-        index, rotate = self._find_shelf_for_item(item, shelves, sheet_width)
-        if index is None:
-            rotate = self._rotation_for_new_shelf(item)
-            width, height = self._dimensions(item, rotate)
-            shelf = self._append_shelf(shelves, height)
-        else:
-            width, height = self._dimensions(item, rotate)
-            shelf = shelves[index]
-
-        shape = item['shape'].copy()
-        if rotate:
-            shape.rotate(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 90)
-
-        bbox = shape.BoundBox
-        move = FreeCAD.Vector(shelf['cursor'] - bbox.XMin, shelf['y'] - bbox.YMin, -bbox.ZMin)
-        shape.translate(move)
-        shelf['cursor'] += width + self.margin
-        return shape
-
-    def _find_shelf_for_item(self,
-                             item: Dict[str, Any],
-                             shelves: List[Dict[str, float]],
-                             sheet_width: float) -> Tuple[Optional[int], bool]:
-        """Locate the best shelf for an item, returning shelf index and rotation flag."""
-        best_index: Optional[int] = None
-        best_leftover = float('inf')
-        best_rotate = False
-
-        for index, shelf in enumerate(shelves):
-            for rotate in (False, True):
-                width, height = self._dimensions(item, rotate)
-                if not self._shelf_fits(shelf, width, height, sheet_width):
-                    continue
-                leftover = shelf['height'] - (height + self.margin)
-                if leftover < best_leftover:
-                    best_leftover = leftover
-                    best_index = index
-                    best_rotate = rotate
-        return best_index, best_rotate
-
-    @staticmethod
-    def _rotation_for_new_shelf(item: Dict[str, Any]) -> bool:
-        """Return True when the item should rotate to better fit a fresh shelf."""
-        return item['height'] > item['width']
-
-    def _append_shelf(self, shelves: List[Dict[str, float]], height: float) -> Dict[str, float]:
-        """Create a new shelf positioned below the previous one."""
-        base_y = shelves[-1]['y'] + shelves[-1]['height'] if shelves else 0.0
-        shelf = {'y': base_y, 'height': height + self.margin, 'cursor': 0.0}
-        shelves.append(shelf)
-        return shelf
-
-    def _dimensions(self, item: Dict[str, Any], rotate: bool) -> Tuple[float, float]:
-        """Return item dimensions, swapping axes when rotation is requested."""
-        if rotate:
-            return item['height'], item['width']
-        return item['width'], item['height']
-
-    def _shelf_fits(self,
-                    shelf: Dict[str, float],
-                    width: float,
-                    height: float,
-                    sheet_width: float) -> bool:
-        """Return True when the provided item fits in the shelf."""
-        if height + self.margin > shelf['height']:
-            return False
-        return (shelf['cursor'] + width + self.margin) <= sheet_width
 
     def _sorted_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Return items ordered by descending area to improve packing quality."""
@@ -953,7 +960,7 @@ class ThicknessSheetLayout:
         """Insert the packed layout into the cloned container."""
         doc = self.doc
         if doc is None:
-            log('Document is unavailable for layout insertion', level='error', exc_cls=DocumentUpdateError)
+            fail('Document is unavailable for layout insertion', DocumentUpdateError)
 
         base_name = self._safe_label(layout_name)
         unique_name = base_name
@@ -964,11 +971,10 @@ class ThicknessSheetLayout:
         try:
             obj = doc.addObject('Part::Feature', unique_name)
         except Exception as exc:
-            log(
+            fail(
                 f"Failed to add layout '{layout_name}' to the document",
-                level='error',
-                exc_cls=DocumentUpdateError,
-                original=exc
+                DocumentUpdateError,
+                exc
             )
 
         obj.Shape = compound
@@ -977,18 +983,17 @@ class ThicknessSheetLayout:
             try:
                 self.container.addObject(obj)
             except Exception as exc:
-                log(
+                fail(
                     f"Failed to attach layout '{layout_name}' to container '{self.container.Label}'",
-                    level='error',
-                    exc_cls=DocumentUpdateError,
-                    original=exc
+                    DocumentUpdateError,
+                    exc
                 )
 
     @staticmethod
     def _face_area(face: Part.Face) -> float:
         """Return the area of a face, guarding against missing data."""
         if not face.isValid():
-            log('Invalid face encountered while computing area', level='error', exc_cls=ProjectionError)
+            fail('Invalid face encountered while computing area', ProjectionError)
         return float(face.Area)
 
     @staticmethod
@@ -1019,38 +1024,25 @@ class ThicknessSheetLayout:
 # 7) Progress helper (console-only status, optional progressbar)
 # =============================================================================
 
-class ProgressScope:
-    """
-    True global progress dialog for the entire process (Flatpak-safe).
-
-    - One dialog per macro run (never multiple)
-    - Title and max can be updated for each phase
-    - Does not close until explicitly finished by main()
-    """
-
-    _instance = None  # singleton
+class ProgressDialog:
+    """Progress dialog managed explicitly and reusable across phases."""
 
     def __init__(self, max_value: int = 100, title: str = "Processing..."):
-        """Create or reuse the singleton progress dialog."""
-        log(f"Initialising progress scope: '{title}'", 1)
-        if ProgressScope._instance is not None:
-            # reuse existing dialog
-            self.dialog = ProgressScope._instance
-            self.set_phase(title, max_value)
-            return
+        self.dialog = QtWidgets.QProgressDialog(title, "Cancel", 0, max_value)
+        self.dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        self.dialog.setAutoClose(False)
+        self.dialog.setAutoReset(False)
+        self.dialog.setMinimumDuration(0)
+        self.dialog.setValue(0)
+        self.dialog.show()
 
-        dlg = QtWidgets.QProgressDialog(title, "Cancel", 0, max_value)
-        dlg.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
-        dlg.setMinimumDuration(0)
-        dlg.setValue(0)
-        dlg.show()
+    def __enter__(self) -> "ProgressDialog":
+        return self
 
-        ProgressScope._instance = dlg
-        self.dialog = dlg
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.finish()
 
-    def set_phase(self, title: str, max_value: int):
+    def set_phase(self, title: str, max_value: int) -> None:
         """Change title and reset value for a new phase."""
         if not self.dialog:
             log(f"[{title}] Starting phase...", 1)
@@ -1060,7 +1052,7 @@ class ProgressScope:
         self.dialog.setValue(0)
         self.process_events()
 
-    def update(self, value: int, text: str = ""):
+    def update(self, value: int, text: str = "") -> None:
         """Advance the progress dialog and optionally display a status message."""
         if text:
             log(text, 1)
@@ -1072,23 +1064,22 @@ class ProgressScope:
         if self.dialog.wasCanceled():
             raise InterruptedError()
 
-    def finish(self):
-        """Close the global dialog once at the end of the entire process."""
+    def finish(self) -> None:
+        """Close the dialog."""
         if self.dialog:
             self.dialog.close()
-        ProgressScope._instance = None
         log("Progress scope finished.", 1)
 
-    def process_events(self):
+    def process_events(self) -> None:
         """Flush Qt events so the dialog keeps responding."""
         QtWidgets.QApplication.processEvents()
 
 
 # =============================================================================
-# 8) Orchestrator: ContainerProcessor (selection → projection)
+# 8) Orchestrator: FingerJointOrchestrator (selection → projection)
 # =============================================================================
 
-class ContainerProcessor:
+class FingerJointOrchestrator:
     """Top-level coordinator: selection → duplication → cutting → projection."""
 
     def __init__(self):
@@ -1109,34 +1100,33 @@ class ContainerProcessor:
             return
 
         self._clone_container()
-        self._process_finger_joints()
-        self._generate_projections()
+        with ProgressDialog(100, "Finger Joint Processing") as progress:
+            self._process_finger_joints(progress)
+            self._generate_projections(progress)
 
-    def _process_finger_joints(self) -> None:
+    def _process_finger_joints(self, progress: ProgressDialog) -> None:
         cloned_parts = self._cloned_parts
         if not cloned_parts:
             fail("No parts remain eligible for processing after duplication.")
 
-        prog = ProgressScope(100, "Finger Joint Processing")
         try:
-            final_shapes = self._compute_finger_joints(cloned_parts, self._globals, prog)
+            final_shapes = self._compute_finger_joints(cloned_parts, self._globals, progress)
             for part in cloned_parts:
                 shape = final_shapes.get(part.Name)
                 if shape is None:
                     continue
                 part.Shape = shape
-            prog.update(100, "✓ All tasks completed.")
+            progress.update(100, "✓ All tasks completed.")
             log("✓ Finger joint processing completed.", 1)
             if hasattr(FreeCADGui, "Selection"):
                 FreeCADGui.Selection.clearSelection()
             try:
                 self.doc.recompute()
             except Exception as exc:
-                log(
+                fail(
                     "Document recompute failed",
-                    level='error',
-                    exc_cls=DocumentUpdateError,
-                    original=exc
+                    DocumentUpdateError,
+                    exc
                 )
         except InterruptedError as exc:
             log("Processing cancelled by user", level='warning')
@@ -1146,14 +1136,12 @@ class ContainerProcessor:
             if isinstance(exc, FingerJointError):
                 raise
             fail(f"Unexpected error: {exc}")
-        finally:
-            prog.finish()
 
 
     def _compute_finger_joints(self,
                                initial_parts: List[FreeCAD.DocumentObject],
                                globals_: GlobalSettings,
-                               prog: ProgressScope) -> Dict[str, Part.Shape]:
+                               prog: ProgressDialog) -> Dict[str, Part.Shape]:
         """Loop over every part pair, build the intersection, and cut the shapes."""
         part_shapes: Dict[str, Part.Shape] = {p.Name: p.Shape for p in initial_parts}
 
@@ -1186,10 +1174,10 @@ class ContainerProcessor:
         return part_shapes
 
 
-    def _generate_projections(self) -> None:
+    def _generate_projections(self, progress: Optional["ProgressDialog"] = None) -> None:
         if not self.clone_container or not self._cloned_parts:
             return
-        ProjectionOrchestrator(self.clone_container, self._cloned_parts).generate()
+        ProjectionOrchestrator(self.clone_container, self._cloned_parts).generate(progress)
 
 
     def _set_active_container(self) -> FreeCAD.DocumentObject:
@@ -1240,11 +1228,10 @@ class ContainerProcessor:
         try:
             clone_container = self.doc.addObject("App::Part", candidate_name)
         except Exception as exc:
-            log(
+            fail(
                 f"Failed to create cloned container for '{base_label}'",
-                level='error',
-                exc_cls=DocumentUpdateError,
-                original=exc
+                DocumentUpdateError,
+                exc
             )
         clone_container.Label = candidate_name
         self.clone_container = clone_container
@@ -1269,11 +1256,10 @@ class ContainerProcessor:
             try:
                 clone_container.addObject(clone)
             except Exception as exc:
-                log(
+                fail(
                     f"Failed to add clone '{clone.Label}' to '{clone_container.Label}'",
-                    level='error',
-                    exc_cls=DocumentUpdateError,
-                    original=exc
+                    DocumentUpdateError,
+                    exc
                 )
             clones.append(clone)
 
@@ -1305,11 +1291,10 @@ class ContainerProcessor:
         try:
             clone = self.doc.addObject("Part::Feature", name_candidate)
         except Exception as exc:
-            log(
+            fail(
                 f"Failed to create clone for '{obj.Label}'",
-                level='error',
-                exc_cls=DocumentUpdateError,
-                original=exc
+                DocumentUpdateError,
+                exc
             )
         clone.Label = name_candidate
         clone.Placement = obj.Placement
@@ -1347,7 +1332,7 @@ def main() -> None:
     """Execute the container processor with structured logging and guards."""
     log("Starting Container Processor…", 1)
     try:
-        ContainerProcessor().run()
+        FingerJointOrchestrator().run()
     except UserCancelledError as exc:
         log(f"Processing cancelled: {exc}", 'info')
     except FingerJointError as exc:
@@ -1355,11 +1340,10 @@ def main() -> None:
         raise
     except Exception as exc:
         traceback.print_exc()
-        log(
+        fail(
             f"Unexpected unhandled exception: {exc}",
-            level='error',
-            exc_cls=FingerJointError,
-            original=exc
+            FingerJointError,
+            exc
         )
 
 

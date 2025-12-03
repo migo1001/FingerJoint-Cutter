@@ -130,10 +130,10 @@ def resolve_container(doc: FreeCAD.Document, label: str) -> FreeCAD.DocumentObje
 
 
 def build_processor(doc: FreeCAD.Document,
-                    container: FreeCAD.DocumentObject) -> 'box.ContainerProcessor':
-    """Instantiate ContainerProcessor with default global settings."""
-    log_action("Instantiating ContainerProcessor with defaults.")
-    processor = box.ContainerProcessor()
+                    container: FreeCAD.DocumentObject) -> 'box.FingerJointOrchestrator':
+    """Instantiate the orchestrator with default global settings."""
+    log_action("Instantiating FingerJointOrchestrator with defaults.")
+    processor = box.FingerJointOrchestrator()
     processor.doc = doc
     processor.container = container
     processor._globals = box.GlobalSettings(
@@ -143,12 +143,13 @@ def build_processor(doc: FreeCAD.Document,
     return processor
 
 
-def run_processor(processor: 'box.ContainerProcessor') -> None:
-    """Execute cloning, finger joints, and projections in order."""
+def run_processor(processor: 'box.FingerJointOrchestrator') -> None:
+    """Execute cloning, finger joints, and projections in order without user UI."""
     log_action("Running processor stages: clone → joints → projections.")
     processor._clone_container()
-    processor._process_finger_joints()
-    processor._generate_projections()
+    with box.ProgressDialog(100, "Finger Joint Processing") as progress:
+        processor._process_finger_joints(progress)
+        processor._generate_projections(progress)
     log_action("Processor stages completed.")
 
 
