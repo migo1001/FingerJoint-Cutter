@@ -260,12 +260,14 @@ class Intersection:
     def __init__(self,
                  part1: FreeCAD.DocumentObject,
                  part2: FreeCAD.DocumentObject,
-                 finger_length: float,
-                 kerf: float):
+                 globals_: GlobalSettings,
+                 used_space: Optional[Part.Shape]):
         self.part1 = part1
         self.part2 = part2
-        self.finger_length = max(1.0, float(finger_length))
-        self.kerf = max(0.0, float(kerf))
+        self.globals = globals_
+        self.finger_length = max(1.0, float(globals_.finger_length))
+        self.kerf = max(0.0, float(globals_.kerf))
+        self.used_space = used_space
 
         self.shape: Optional[Part.Shape] = None
         self.volume: float = 0.0
@@ -406,6 +408,23 @@ class Intersection:
 
     def is_valid_fingers(self) -> bool:
         return bool(self._finger_boxes)
+    def process(self,
+                ) -> Optional[Part.Shape]:
+        """
+        Compute intersection, generate fingers, and cut parts in one step.
+        Returns updated used_space.
+        """
+        updated_space = self.calculate(self.used_space)
+        if not self.is_valid():
+            return updated_space
+        self.generate_fingers()
+        if not self.is_valid_fingers():
+            return updated_space
+        new1, new2 = self.cut_fingers(self.part1.Shape, self.part2.Shape)
+        self.part1.Shape = new1
+        self.part2.Shape = new2
+        self.used_space = updated_space
+        return updated_space
 
     def _create_finger_boxes(self) -> List[Part.Shape]:
         if not self.bbox or self.longest_edge_len <= GEOM_EPS:
@@ -480,13 +499,16 @@ class Intersection:
 
     # --- Cutting ---------------------------------------------------------------
 
-    def cut_fingers(self, part_shapes: Dict[str, Part.Shape]) -> None:
+    def cut_fingers(self,
+                    shape1: Part.Shape,
+                    shape2: Part.Shape) -> Tuple[Part.Shape, Part.Shape]:
         """Apply the precomputed finger boxes to the supplied shapes."""
         if not self._finger_boxes:
-            return
+            return shape1, shape2
         cut1, cut2 = self._split_cutters(self._finger_boxes)
-        BooleanCutter.apply(part_shapes, self.part1.Name, cut1)
-        BooleanCutter.apply(part_shapes, self.part2.Name, cut2)
+        new1 = BooleanCutter.apply(shape1, cut1)
+        new2 = BooleanCutter.apply(shape2, cut2)
+        return new1, new2
 
     def _split_cutters(self, boxes: List[Part.Shape]) -> Tuple[Part.Compound, Part.Compound]:
         cut1 = Part.Compound([boxes[i] for i in range(1, len(boxes), 2)])
@@ -516,23 +538,17 @@ class Intersection:
 
 
 class BooleanCutter:
-    """Helper to apply boolean cutters to cloned part shapes."""
+    """Helper to apply boolean cutters to shapes."""
 
     @staticmethod
-    def apply(part_shapes: Dict[str, Part.Shape],
-              part_name: str,
-              cutter: Part.Shape) -> None:
+    def apply(shape: Part.Shape, cutter: Part.Shape) -> Part.Shape:
         if cutter.isNull() or not cutter.isValid():
-            return
-        shape = part_shapes.get(part_name)
-        if shape is None:
-            log(f"[checkpoint] intersection_apply_missing_part: part={part_name}")
-            return
+            return shape
         try:
             result = shape.cut(cutter)
         except Part.OCCError as exc:
             fail(
-                f"Boolean cut failed for part '{part_name}'",
+                "Boolean cut failed for shape",
                 IntersectionError,
                 exc
             )
@@ -541,11 +557,11 @@ class BooleanCutter:
                 result = result.removeSplitter()
             except Exception as exc:
                 fail(
-                    f"removeSplitter failed for part '{part_name}'",
+                    "removeSplitter failed for shape",
                     DocumentUpdateError,
                     exc
                 )
-        part_shapes[part_name] = BooleanCutter._largest_solid(result)
+        return BooleanCutter._largest_solid(result)
 
     @staticmethod
     def _largest_solid(shape: Part.Shape) -> Part.Shape:
@@ -1089,6 +1105,7 @@ class FingerJointOrchestrator:
         self.used_space: Optional[Part.Shape] = None
         self._cloned_parts: List[FreeCAD.DocumentObject] = []
         self._globals: Optional[GlobalSettings] = None
+        self.progress: Optional[ProgressDialog] = None
 
     def run(self) -> None:
         """Execute selection → duplication → cutting → projection."""
@@ -1101,22 +1118,37 @@ class FingerJointOrchestrator:
 
         self._clone_container()
         with ProgressDialog(100, "Finger Joint Processing") as progress:
-            self._process_finger_joints(progress)
-            self._generate_projections(progress)
+            self.progress = progress
+            self._process_finger_joints_and_apply()
+            self._generate_projections()
+            self.progress = None
 
-    def _process_finger_joints(self, progress: ProgressDialog) -> None:
-        cloned_parts = self._cloned_parts
-        if not cloned_parts:
+    def _process_finger_joints_and_apply(self) -> None:
+        """Compute finger joints, apply them to clones, and handle UX/progress."""
+        if not self._cloned_parts:
             fail("No parts remain eligible for processing after duplication.")
 
+        if self.progress is None:
+            fail("Progress dialog not initialised for finger joint processing.", ProgressError)
+
+        if self._globals is None:
+            fail("Global settings missing for finger joint computation.", ProgressError)
+
         try:
-            final_shapes = self._compute_finger_joints(cloned_parts, self._globals, progress)
-            for part in cloned_parts:
-                shape = final_shapes.get(part.Name)
-                if shape is None:
-                    continue
-                part.Shape = shape
-            progress.update(100, "✓ All tasks completed.")
+            total_pairs = (len(self._cloned_parts) * (len(self._cloned_parts) - 1)) // 2
+            log(f"Processing {len(self._cloned_parts)} parts → {total_pairs} intersections.", 1)
+            self.progress.set_phase("Applying Finger Joints", max(1, total_pairs))
+
+            pair_index = 0
+            for i, part_a in enumerate(self._cloned_parts):
+                for j in range(i + 1, len(self._cloned_parts)):
+                    part_b = self._cloned_parts[j]
+                    self.progress.update(pair_index, f"Pair: {part_a.Label} vs {part_b.Label}")
+                    pair_index += 1
+                    intersection = Intersection(part_a, part_b, self._globals, self.used_space)
+                    self.used_space = intersection.process()
+
+            self.progress.update(100, "✓ All tasks completed.")
             log("✓ Finger joint processing completed.", 1)
             if hasattr(FreeCADGui, "Selection"):
                 FreeCADGui.Selection.clearSelection()
@@ -1138,46 +1170,10 @@ class FingerJointOrchestrator:
             fail(f"Unexpected error: {exc}")
 
 
-    def _compute_finger_joints(self,
-                               initial_parts: List[FreeCAD.DocumentObject],
-                               globals_: GlobalSettings,
-                               prog: ProgressDialog) -> Dict[str, Part.Shape]:
-        """Loop over every part pair, build the intersection, and cut the shapes."""
-        part_shapes: Dict[str, Part.Shape] = {p.Name: p.Shape for p in initial_parts}
-
-        total_pairs = (len(initial_parts) * (len(initial_parts) - 1)) // 2
-        log(f"Processing {len(initial_parts)} parts → {total_pairs} intersections.", 1)
-        prog.set_phase("Applying Finger Joints", max(1, total_pairs))
-
-        pair_index = 0
-        for i, part_a in enumerate(initial_parts):
-            for j in range(i + 1, len(initial_parts)):
-                part_b = initial_parts[j]
-                prog.update(pair_index, f"Pair: {part_a.Label} vs {part_b.Label}")
-                pair_index += 1
-
-                intersection = Intersection(
-                    part_a,
-                    part_b,
-                    globals_.finger_length,
-                    globals_.kerf
-                )
-                self.used_space = intersection.calculate(self.used_space)
-                if not intersection.is_valid():
-                    continue
-                intersection.generate_fingers()
-                if not intersection.is_valid_fingers():
-                    continue
-                intersection.cut_fingers(part_shapes)
-
-        log(f"Completed finger joint computation for {len(part_shapes)} parts.", 1)
-        return part_shapes
-
-
-    def _generate_projections(self, progress: Optional["ProgressDialog"] = None) -> None:
+    def _generate_projections(self) -> None:
         if not self.clone_container or not self._cloned_parts:
             return
-        ProjectionOrchestrator(self.clone_container, self._cloned_parts).generate(progress)
+        ProjectionOrchestrator(self.clone_container, self._cloned_parts).generate(self.progress)
 
 
     def _set_active_container(self) -> FreeCAD.DocumentObject:

@@ -148,8 +148,10 @@ def run_processor(processor: 'box.FingerJointOrchestrator') -> None:
     log_action("Running processor stages: clone → joints → projections.")
     processor._clone_container()
     with box.ProgressDialog(100, "Finger Joint Processing") as progress:
-        processor._process_finger_joints(progress)
-        processor._generate_projections(progress)
+        processor.progress = progress
+        processor._process_finger_joints_and_apply()
+        processor._generate_projections()
+        processor.progress = None
     log_action("Processor stages completed.")
 
 
