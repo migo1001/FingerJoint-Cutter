@@ -140,33 +140,6 @@ def fail(msg: str,
     raise exc_cls(msg)
 
 
-def _load_saved_settings() -> Tuple[float, float]:
-    """Return persisted kerf and finger length, falling back to defaults."""
-    kerf = DEFAULT_KERF_MM
-    finger = DEFAULT_MIN_FINGER_LENGTH
-    try:
-        params = FreeCAD.ParamGet(PREFS_GROUP)
-        kerf = float(params.GetFloat(PREF_KERF, kerf))
-        finger = float(params.GetFloat(PREF_FINGER, finger))
-    except Exception:
-        log("Preferences unavailable; using defaults for kerf and finger length.", 'warning')
-        return kerf, finger
-
-    kerf = kerf if kerf >= 0.0 else DEFAULT_KERF_MM
-    finger = finger if finger >= 1.0 else DEFAULT_MIN_FINGER_LENGTH
-    return kerf, finger
-
-
-def _persist_settings(kerf: float, finger_length: float) -> None:
-    """Store kerf and finger length for reuse in future runs."""
-    try:
-        params = FreeCAD.ParamGet(PREFS_GROUP)
-        params.SetFloat(PREF_KERF, float(kerf))
-        params.SetFloat(PREF_FINGER, float(finger_length))
-    except Exception:
-        log("Failed to persist settings; defaults will be used next time.", 'warning')
-
-
 
 # =============================================================================
 # 3) Logging + vector helpers
@@ -200,7 +173,7 @@ class FingerJointDialog(QtWidgets.QDialog):
 
         form = QtWidgets.QFormLayout()
 
-        saved_kerf, saved_finger = _load_saved_settings()
+        saved_kerf, saved_finger = self._load_saved_settings()
 
         self.kerf_spin = QtWidgets.QDoubleSpinBox()
         self.kerf_spin.setRange(0.0, 5.0)
@@ -233,8 +206,35 @@ class FingerJointDialog(QtWidgets.QDialog):
             return None
         kerf = self.kerf_spin.value()
         finger_length = self.finger_spin.value()
-        _persist_settings(kerf, finger_length)
+        self._persist_settings(kerf, finger_length)
         return GlobalSettings(kerf=kerf, finger_length=finger_length)
+
+    @staticmethod
+    def _load_saved_settings() -> Tuple[float, float]:
+        """Return persisted kerf and finger length, falling back to defaults."""
+        kerf = DEFAULT_KERF_MM
+        finger = DEFAULT_MIN_FINGER_LENGTH
+        try:
+            params = FreeCAD.ParamGet(PREFS_GROUP)
+            kerf = float(params.GetFloat(PREF_KERF, kerf))
+            finger = float(params.GetFloat(PREF_FINGER, finger))
+        except Exception:
+            log("Preferences unavailable; using defaults for kerf and finger length.", 'warning')
+            return kerf, finger
+
+        kerf = kerf if kerf >= 0.0 else DEFAULT_KERF_MM
+        finger = finger if finger >= 1.0 else DEFAULT_MIN_FINGER_LENGTH
+        return kerf, finger
+
+    @staticmethod
+    def _persist_settings(kerf: float, finger_length: float) -> None:
+        """Store kerf and finger length for reuse in future runs."""
+        try:
+            params = FreeCAD.ParamGet(PREFS_GROUP)
+            params.SetFloat(PREF_KERF, float(kerf))
+            params.SetFloat(PREF_FINGER, float(finger_length))
+        except Exception:
+            log("Failed to persist settings; defaults will be used next time.", 'warning')
 
 
 # =============================================================================
@@ -279,24 +279,45 @@ class Intersection:
         self._has_geometry = False
         self._finger_boxes: List[Part.Shape] = []
 
+
+    def process(self,
+                ) -> Optional[Part.Shape]:
+        """
+        Compute intersection, generate fingers, and cut parts in one step.
+        Returns updated used_space.
+        """
+        self.update_used_space()
+        if not self.is_valid():
+            return self.used_space
+        self.generate_fingers()
+        if not self.is_valid_fingers():
+            return self.used_space
+        new1, new2 = self.cut_fingers(self.part1.Shape, self.part2.Shape)
+        self.part1.Shape = new1
+        self.part2.Shape = new2
+        return self.used_space
+
+
+
     # --- Calculation ----------------------------------------------------------
 
-    def calculate(self,
-                  used_space: Optional[Part.Shape] = None) -> Optional[Part.Shape]:
+    def update_used_space(self) -> Optional[Part.Shape]:
         """Compute the trimmed intersection and update the used-space mask."""
         raw = self._pairwise_common()
         if raw is None or not raw.isValid() or raw.Volume < GEOM_EPS:
             self._has_geometry = False
-            return used_space
+            return self.used_space
 
-        trimmed, updated_space = self._trim_against_used_space(raw, used_space)
+        trimmed, updated_space = self._trim_against_used_space(raw, self.used_space)
         if trimmed is None:
             self._has_geometry = False
-            return updated_space
+            self.used_space = updated_space
+            return self.used_space
 
         self._populate_from_shape(trimmed)
         self._has_geometry = True
-        return updated_space
+        self.used_space = updated_space
+        return self.used_space
 
     def is_valid(self) -> bool:
         return self._has_geometry
@@ -408,23 +429,7 @@ class Intersection:
 
     def is_valid_fingers(self) -> bool:
         return bool(self._finger_boxes)
-    def process(self,
-                ) -> Optional[Part.Shape]:
-        """
-        Compute intersection, generate fingers, and cut parts in one step.
-        Returns updated used_space.
-        """
-        updated_space = self.calculate(self.used_space)
-        if not self.is_valid():
-            return updated_space
-        self.generate_fingers()
-        if not self.is_valid_fingers():
-            return updated_space
-        new1, new2 = self.cut_fingers(self.part1.Shape, self.part2.Shape)
-        self.part1.Shape = new1
-        self.part2.Shape = new2
-        self.used_space = updated_space
-        return updated_space
+        
 
     def _create_finger_boxes(self) -> List[Part.Shape]:
         if not self.bbox or self.longest_edge_len <= GEOM_EPS:
