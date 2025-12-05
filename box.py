@@ -1115,23 +1115,22 @@ class FingerJointOrchestrator:
 
     def __init__(self):
         self.doc: Optional[FreeCAD.Document] = None
-        self.container: Optional[FreeCAD.DocumentObject] = None
-        self.clone_container: Optional[FreeCAD.DocumentObject] = None
+        self.container: Optional[FreeCAD.DocumentObject] = None  # working (cloned) container
         self.used_space: Optional[Part.Shape] = None
-        self._cloned_parts: List[FreeCAD.DocumentObject] = []
+        self.parts: List[FreeCAD.DocumentObject] = []
         self._globals: Optional[GlobalSettings] = None
         self.progress: Optional[ProgressDialog] = None
 
     def run(self) -> None:
         """Execute selection → duplication → cutting → projection."""
 
-        self._set_active_container()
+        original_container = self._get_original_container()
         self._collect_user_preferences()
         if self._globals is None:
             log("User canceled — nothing to do.", 1)
             return
 
-        self._clone_container()
+        self._clone_container(original_container)
         with ProgressDialog(100, "Finger Joint Processing") as progress:
             self.progress = progress
             self._process_finger_joints_and_apply()
@@ -1140,7 +1139,7 @@ class FingerJointOrchestrator:
 
     def _process_finger_joints_and_apply(self) -> None:
         """Compute finger joints, apply them to clones, and handle UX/progress."""
-        if not self._cloned_parts:
+        if not self.parts:
             fail("No parts remain eligible for processing after duplication.")
 
         if self.progress is None:
@@ -1150,14 +1149,14 @@ class FingerJointOrchestrator:
             fail("Global settings missing for finger joint computation.", ProgressError)
 
         try:
-            total_pairs = (len(self._cloned_parts) * (len(self._cloned_parts) - 1)) // 2
-            log(f"Processing {len(self._cloned_parts)} parts → {total_pairs} intersections.", 1)
+            total_pairs = (len(self.parts) * (len(self.parts) - 1)) // 2
+            log(f"Processing {len(self.parts)} parts → {total_pairs} intersections.", 1)
             self.progress.set_phase("Applying Finger Joints", max(1, total_pairs))
 
             pair_index = 0
-            for i, part_a in enumerate(self._cloned_parts):
-                for j in range(i + 1, len(self._cloned_parts)):
-                    part_b = self._cloned_parts[j]
+            for i, part_a in enumerate(self.parts):
+                for j in range(i + 1, len(self.parts)):
+                    part_b = self.parts[j]
                     self.progress.update(pair_index, f"Pair: {part_a.Label} vs {part_b.Label}")
                     pair_index += 1
                     intersection = Intersection(part_a, part_b, self._globals, self.used_space)
@@ -1186,26 +1185,27 @@ class FingerJointOrchestrator:
 
 
     def _generate_projections(self) -> None:
-        if not self.clone_container or not self._cloned_parts:
+        if not self.container or not self.parts:
             return
-        ProjectionOrchestrator(self.clone_container, self._cloned_parts, self.progress).generate()
+        ProjectionOrchestrator(self.container, self.parts, self.progress).generate()
 
 
-    def _set_active_container(self) -> FreeCAD.DocumentObject:
+    def _get_original_container(self) -> FreeCAD.DocumentObject:
         selection_api = getattr(FreeCADGui, "Selection", None)
         if selection_api is None:
             fail("FreeCADGui selection API unavailable.")
         selection = selection_api.getSelection()
         if not selection:
             fail("Select a Part/App::Part container before running the macro.")
-        self.container = selection[0]
-        type_id = getattr(self.container, "TypeId", "")
+        original_container = selection[0]
+        type_id = getattr(original_container, "TypeId", "")
         if type_id not in {"App::Part", "Part::Part"}:
             fail("Selected object is not a Part container.")     
-        container_doc = getattr(self.container, 'Document', None)
+        container_doc = getattr(original_container, 'Document', None)
         if container_doc is None:
             fail("Selected container is not attached to a document.")
         self.doc = container_doc
+        return original_container
 
 
 
@@ -1232,9 +1232,9 @@ class FingerJointOrchestrator:
             log("Dialog dismissed with no values.", 1)
             self._globals = None
 
-    def _clone_container(self) -> None:
+    def _clone_container(self, original_container: FreeCAD.DocumentObject) -> None:
         """Create a new App::Part populated with clones from the original container."""
-        base_label = getattr(self.container, "Label", self.container.Name)
+        base_label = getattr(original_container, "Label", original_container.Name)
         candidate_name = self._unique_name(base_label)
         try:
             clone_container = self.doc.addObject("App::Part", candidate_name)
@@ -1245,11 +1245,11 @@ class FingerJointOrchestrator:
                 exc
             )
         clone_container.Label = candidate_name
-        self.clone_container = clone_container
+        self.container = clone_container
 
         clones: List[FreeCAD.DocumentObject] = []
         visited: Set[int] = set()
-        stack = list(reversed(getattr(self.container, "Group", []) or []))
+        stack = list(reversed(getattr(original_container, "Group", []) or []))
         while stack:
             node = stack.pop()
             ident = id(node)
@@ -1277,11 +1277,11 @@ class FingerJointOrchestrator:
         if not clones:
             fail("Selected container has no processable solids.")
 
-        self._cloned_parts = clones
+        self.parts = clones
         if hasattr(clone_container, "ViewObject"):
             clone_container.ViewObject.Visibility = True
-        if hasattr(self.container, "ViewObject"):
-            self.container.ViewObject.Visibility = False
+        if hasattr(original_container, "ViewObject"):
+            original_container.ViewObject.Visibility = False
 
     def _clone_part(self, obj: FreeCAD.DocumentObject) -> Optional[FreeCAD.DocumentObject]:
         """Create a Part::Feature clone with copied placement and shape."""
