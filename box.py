@@ -278,6 +278,7 @@ class Intersection:
 
         self._has_geometry = False
         self._finger_boxes: List[Part.Shape] = []
+        self._pending_trimmed: Optional[Part.Shape] = None
 
 
     def process(self,
@@ -292,9 +293,10 @@ class Intersection:
         self.generate_fingers()
         if not self.is_valid_fingers():
             return self.used_space
-        new1, new2 = self.cut_fingers(self.part1.Shape, self.part2.Shape)
+        new1, new2 = self.cut_fingers()
         self.part1.Shape = new1
         self.part2.Shape = new2
+        self._commit_used_space()
         return self.used_space
 
 
@@ -302,21 +304,22 @@ class Intersection:
     # --- Calculation ----------------------------------------------------------
 
     def update_used_space(self) -> Optional[Part.Shape]:
-        """Compute the trimmed intersection and update the used-space mask."""
+        """Compute the trimmed intersection; used-space is updated only after successful cuts."""
         raw = self._pairwise_common()
         if raw is None or not raw.isValid() or raw.Volume < GEOM_EPS:
             self._has_geometry = False
+            self._pending_trimmed = None
             return self.used_space
 
-        trimmed, updated_space = self._trim_against_used_space(raw, self.used_space)
+        trimmed = self._trim_against_used_space(raw)
         if trimmed is None:
             self._has_geometry = False
-            self.used_space = updated_space
+            self._pending_trimmed = None
             return self.used_space
 
         self._populate_from_shape(trimmed)
         self._has_geometry = True
-        self.used_space = updated_space
+        self._pending_trimmed = trimmed
         return self.used_space
 
     def is_valid(self) -> bool:
@@ -342,14 +345,13 @@ class Intersection:
             )
 
     def _trim_against_used_space(self,
-                                 shape: Part.Shape,
-                                 used_space: Optional[Part.Shape]) -> Tuple[Optional[Part.Shape], Optional[Part.Shape]]:
-        if used_space is None or not used_space.isValid():
-            return shape, shape
+                                 shape: Part.Shape) -> Optional[Part.Shape]:
+        if self.used_space is None or not self.used_space.isValid():
+            return shape
 
         trimmed = shape.copy()
         try:
-            trimmed = trimmed.cut(used_space)
+            trimmed = trimmed.cut(self.used_space)
         except Part.OCCError as exc:
             fail(
                 "Failed to subtract already used intersection volume",
@@ -357,18 +359,27 @@ class Intersection:
                 exc
             )
 
-        if trimmed.Volume < GEOM_EPS:
-            return None, used_space
+        if trimmed.Volume < GEOM_EPS or not trimmed.isValid():
+            return None
+        return trimmed
 
+    def _commit_used_space(self) -> None:
+        """Persist the trimmed intersection into the used-space mask after cuts succeed."""
+        if self._pending_trimmed is None or not self._pending_trimmed.isValid():
+            return
+        if self.used_space is None or not self.used_space.isValid():
+            self.used_space = self._pending_trimmed
+            self._pending_trimmed = None
+            return
         try:
-            updated_space = used_space.fuse(trimmed)
+            self.used_space = self.used_space.fuse(self._pending_trimmed)
         except Part.OCCError as exc:
             fail(
                 "Failed to accumulate used intersection volume",
                 IntersectionError,
                 exc
             )
-        return trimmed, updated_space
+        self._pending_trimmed = None
 
     def _determine_type(self) -> None:
         if not self.shape:
@@ -439,14 +450,13 @@ class Intersection:
             return []
         segment_length = self.longest_edge_len / float(finger_count)
         half_kerf = self.kerf * 0.5
-        axis = self.primary_axis_idx
         boxes: List[Part.Shape] = []
         for index in range(finger_count):
             start, length = self._segment_with_kerf(segment_length, index, finger_count, half_kerf)
             if length <= GEOM_EPS:
                 continue
-            base = self._segment_base(axis, start)
-            size = self._segment_size(axis, length)
+            base = self._segment_base(start)
+            size = self._segment_size(length)
             boxes.append(Part.makeBox(size[0], size[1], size[2], base))
         return boxes
 
@@ -456,8 +466,6 @@ class Intersection:
         minimum_length = max(1.0, self.finger_length)
         max_fingers = int(self.longest_edge_len / minimum_length)
         candidate = max_fingers if max_fingers % 2 == 1 else max_fingers - 1
-        while candidate >= MIN_FINGER_COUNT and (self.longest_edge_len / candidate) + GEOM_EPS < minimum_length:
-            candidate -= 2
         if candidate >= MIN_FINGER_COUNT:
             return candidate
         fallback = MIN_FINGER_COUNT
@@ -486,16 +494,18 @@ class Intersection:
             length -= half_kerf
         return start, length
 
-    def _segment_base(self, axis: int, start: float) -> FreeCAD.Vector:
+    def _segment_base(self, start: float) -> FreeCAD.Vector:
         x0, y0, z0 = self.bbox.XMin, self.bbox.YMin, self.bbox.ZMin
+        axis = self.primary_axis_idx
         if axis == 0:
             return FreeCAD.Vector(x0 + start, y0, z0)
         if axis == 1:
             return FreeCAD.Vector(x0, y0 + start, z0)
         return FreeCAD.Vector(x0, y0, z0 + start)
 
-    def _segment_size(self, axis: int, length: float) -> Tuple[float, float, float]:
+    def _segment_size(self, length: float) -> Tuple[float, float, float]:
         dx, dy, dz = self.bbox.XLength, self.bbox.YLength, self.bbox.ZLength
+        axis = self.primary_axis_idx
         if axis == 0:
             return length, dy, dz
         if axis == 1:
@@ -504,20 +514,18 @@ class Intersection:
 
     # --- Cutting ---------------------------------------------------------------
 
-    def cut_fingers(self,
-                    shape1: Part.Shape,
-                    shape2: Part.Shape) -> Tuple[Part.Shape, Part.Shape]:
+    def cut_fingers(self) -> Tuple[Part.Shape, Part.Shape]:
         """Apply the precomputed finger boxes to the supplied shapes."""
         if not self._finger_boxes:
-            return shape1, shape2
-        cut1, cut2 = self._split_cutters(self._finger_boxes)
-        new1 = BooleanCutter.apply(shape1, cut1)
-        new2 = BooleanCutter.apply(shape2, cut2)
+            return self.part1.Shape, self.part2.Shape
+        cut1, cut2 = self._split_cutters()
+        new1 = BooleanCutter.apply(self.part1.Shape, cut1)
+        new2 = BooleanCutter.apply(self.part2.Shape, cut2)
         return new1, new2
 
-    def _split_cutters(self, boxes: List[Part.Shape]) -> Tuple[Part.Compound, Part.Compound]:
-        cut1 = Part.Compound([boxes[i] for i in range(1, len(boxes), 2)])
-        cut2 = Part.Compound([boxes[i] for i in range(0, len(boxes), 2)])
+    def _split_cutters(self) -> Tuple[Part.Compound, Part.Compound]:
+        cut1 = Part.Compound([self._finger_boxes[i] for i in range(1, len(self._finger_boxes), 2)])
+        cut2 = Part.Compound([self._finger_boxes[i] for i in range(0, len(self._finger_boxes), 2)])
         return cut1, cut2
 
     @staticmethod
@@ -594,13 +602,15 @@ class ProjectionOrchestrator:
 
     def __init__(self,
                  container: Optional[FreeCAD.DocumentObject],
-                 parts: List[FreeCAD.DocumentObject]):
+                 parts: List[FreeCAD.DocumentObject],
+                 progress: Optional["ProgressDialog"] = None):
         """Store references needed to populate layout objects."""
         self.container = container
         self.doc = container.Document if container is not None else FreeCAD.ActiveDocument
         self.parts = parts or []
+        self.progress = progress
 
-    def generate(self, progress: Optional["ProgressDialog"] = None) -> None:
+    def generate(self) -> None:
         """Create projection layouts for every detected thickness in the container."""
         log('ProjectionOrchestrator: starting projection build.', 1)
         if self.container is None:
@@ -611,44 +621,43 @@ class ProjectionOrchestrator:
             log('ProjectionOrchestrator: no solids provided for projection.', 1)
             return
 
-        groups = self._group_parts_by_thickness(self.parts)
+        groups = self._group_parts_by_thickness()
         if not groups:
             log('ProjectionOrchestrator: no thickness groups to process.', 1)
             return
 
         offset = self._starting_offset()
-        local_progress = progress
         owns_progress = False
-        if local_progress is None:
-            local_progress = ProgressDialog(max(1, len(groups)), 'Projection Layouts')
+        if self.progress is None:
+            self.progress = ProgressDialog(max(1, len(groups)), 'Projection Layouts')
             owns_progress = True
         else:
-            local_progress.set_phase('Projection Layouts', max(1, len(groups)))
+            self.progress.set_phase('Projection Layouts', max(1, len(groups)))
 
         try:
             for index, (thickness, group) in enumerate(groups):
-                if local_progress:
-                    local_progress.update(index, f'Projection sheet for {thickness:.1f} mm parts')
+                if self.progress:
+                    self.progress.update(index, f'Projection sheet for {thickness:.1f} mm parts')
                 builder = ThicknessSheetLayout(
                     container=self.container,
                     thickness=thickness,
                     parts=group,
                     offset=FreeCAD.Vector(offset),  # use a copy so later mutations don't affect placed layouts
-                    progress=local_progress
+                    progress=self.progress
                 )
                 height = builder.build()
                 offset.y += height + LAYOUT_GAP
         finally:
-            if owns_progress and local_progress:
-                local_progress.finish()
+            if owns_progress and self.progress:
+                self.progress.finish()
+                self.progress = None
 
         log('ProjectionOrchestrator: completed projection layouts.', 1)
 
-    def _group_parts_by_thickness(self,
-                                  parts: List[FreeCAD.DocumentObject]) -> List[Tuple[float, List[FreeCAD.DocumentObject]]]:
+    def _group_parts_by_thickness(self) -> List[Tuple[float, List[FreeCAD.DocumentObject]]]:
         """Return parts grouped by their minimum bounding box dimension (thickness)."""
         groups: Dict[float, List[FreeCAD.DocumentObject]] = {}
-        for obj in parts:
+        for obj in self.parts:
             thickness = self._part_thickness(obj)
             groups.setdefault(thickness, []).append(obj)
         ordered = sorted(groups.items(), key=lambda item: item[0])
@@ -676,28 +685,31 @@ class ShelfPacker:
 
     def __init__(self, margin: float):
         self.margin = margin
+        self.items: List[Dict[str, Any]] = []
+        self.shelves: List[Dict[str, float]] = []
+        self.sheet_width: float = 0.0
 
     def pack(self,
              items: List[Dict[str, Any]],
              sheet_width: float) -> List[Part.Shape]:
-        shelves: List[Dict[str, float]] = []
+        self.items = items
+        self.sheet_width = sheet_width
+        self.shelves = []
         placed_shapes: List[Part.Shape] = []
-        for item in items:
-            placed_shapes.append(self._place_item(item, shelves, sheet_width))
+        for item in self.items:
+            placed_shapes.append(self._place_item(item))
         return placed_shapes
 
     def _place_item(self,
-                    item: Dict[str, Any],
-                    shelves: List[Dict[str, float]],
-                    sheet_width: float) -> Part.Shape:
-        index, rotate = self._find_shelf_for_item(item, shelves, sheet_width)
+                    item: Dict[str, Any]) -> Part.Shape:
+        index, rotate = self._find_shelf_for_item(item)
         if index is None:
             rotate = self._rotation_for_new_shelf(item)
             width, height = self._dimensions(item, rotate)
-            shelf = self._append_shelf(shelves, height)
+            shelf = self._append_shelf(height)
         else:
             width, height = self._dimensions(item, rotate)
-            shelf = shelves[index]
+            shelf = self.shelves[index]
 
         shape = item['shape'].copy()
         if rotate:
@@ -710,18 +722,16 @@ class ShelfPacker:
         return shape
 
     def _find_shelf_for_item(self,
-                             item: Dict[str, Any],
-                             shelves: List[Dict[str, float]],
-                             sheet_width: float) -> Tuple[Optional[int], bool]:
+                             item: Dict[str, Any]) -> Tuple[Optional[int], bool]:
         """Locate the best shelf for an item, returning shelf index and rotation flag."""
         best_index: Optional[int] = None
         best_leftover = float('inf')
         best_rotate = False
 
-        for index, shelf in enumerate(shelves):
+        for index, shelf in enumerate(self.shelves):
             for rotate in (False, True):
                 width, height = self._dimensions(item, rotate)
-                if not self._shelf_fits(shelf, width, height, sheet_width):
+                if not self._shelf_fits(shelf, width, height):
                     continue
                 leftover = shelf['height'] - (height + self.margin)
                 if leftover < best_leftover:
@@ -735,11 +745,11 @@ class ShelfPacker:
         """Return True when the item should rotate to better fit a fresh shelf."""
         return item['height'] > item['width']
 
-    def _append_shelf(self, shelves: List[Dict[str, float]], height: float) -> Dict[str, float]:
+    def _append_shelf(self, height: float) -> Dict[str, float]:
         """Create a new shelf positioned below the previous one."""
-        base_y = shelves[-1]['y'] + shelves[-1]['height'] if shelves else 0.0
+        base_y = self.shelves[-1]['y'] + self.shelves[-1]['height'] if self.shelves else 0.0
         shelf = {'y': base_y, 'height': height + self.margin, 'cursor': 0.0}
-        shelves.append(shelf)
+        self.shelves.append(shelf)
         return shelf
 
     @staticmethod
@@ -752,12 +762,11 @@ class ShelfPacker:
     def _shelf_fits(self,
                     shelf: Dict[str, float],
                     width: float,
-                    height: float,
-                    sheet_width: float) -> bool:
+                    height: float) -> bool:
         """Return True when the provided item fits in the shelf."""
         if height + self.margin > shelf['height']:
             return False
-        return (shelf['cursor'] + width + self.margin) <= sheet_width
+        return (shelf['cursor'] + width + self.margin) <= self.sheet_width
 
 
 class ThicknessSheetLayout:
@@ -778,6 +787,10 @@ class ThicknessSheetLayout:
         self.progress = progress
         self.margin = PROJECTION_MARGIN
         self.tol = GEOM_EPS
+        self._items: List[Dict[str, Any]] = []
+        self._ordered_items: List[Dict[str, Any]] = []
+        self._compound: Optional[Part.Shape] = None
+        self._layout_name: Optional[str] = None
 
     def build(self) -> float:
         """Flatten, pack, and attach a layout for the stored parts."""
@@ -786,19 +799,19 @@ class ThicknessSheetLayout:
             log('ThicknessSheetLayout: no parts provided for this thickness.', 1)
             return 0.0
 
-        items = self._collect_projections()
-        if not items:
+        self._items = self._collect_projections()
+        if not self._items:
             log('ThicknessSheetLayout: projection items list empty.', 1)
             return 0.0
 
-        ordered = self._sorted_items(items)
-        compound, layout_height = self._build_layout_compound(ordered)
-        if compound is None:
+        self._ordered_items = self._sorted_items()
+        self._compound, layout_height = self._build_layout_compound()
+        if self._compound is None:
             return 0.0
 
-        layout_name = self._layout_label()
-        self._attach_layout_to_container(layout_name, compound)
-        log(f"ThicknessSheetLayout: layout '{layout_name}' created.", 1)
+        self._layout_name = self._layout_label()
+        self._attach_layout_to_container()
+        log(f"ThicknessSheetLayout: layout '{self._layout_name}' created.", 1)
         return layout_height
 
     def _collect_projections(self) -> List[Dict[str, Any]]:
@@ -925,17 +938,16 @@ class ThicknessSheetLayout:
         face.translate(move)
         return face
 
-    def _build_layout_compound(self,
-                               items: List[Dict[str, Any]]) -> Tuple[Optional[Part.Shape], float]:
+    def _build_layout_compound(self) -> Tuple[Optional[Part.Shape], float]:
         """Create a translated compound ready for document insertion."""
-        total_area = self._total_packing_area(items)
+        total_area = self._total_packing_area()
         if total_area <= 0.0:
             log('ThicknessSheetLayout: projected items have no packing area.', 1)
             return None, 0.0
 
         sheet_width = self._sheet_width(total_area)
         packer = ShelfPacker(self.margin)
-        placed_shapes = packer.pack(items, sheet_width)
+        placed_shapes = packer.pack(self._ordered_items, sheet_width)
         if not placed_shapes:
             log('ThicknessSheetLayout: no shapes were placed during packing.', 1)
             return None, 0.0
@@ -949,14 +961,14 @@ class ThicknessSheetLayout:
         layout_height = compound.BoundBox.YLength if compound.isValid() else 0.0
         return compound, layout_height
 
-    def _sorted_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _sorted_items(self) -> List[Dict[str, Any]]:
         """Return items ordered by descending area to improve packing quality."""
-        return sorted(items, key=self._item_area, reverse=True)
+        return sorted(self._items, key=self._item_area, reverse=True)
 
-    def _total_packing_area(self, items: List[Dict[str, Any]]) -> float:
+    def _total_packing_area(self) -> float:
         """Return the summed area needed for all items including margins."""
         total = 0.0
-        for item in items:
+        for item in self._ordered_items:
             total += (item['width'] + self.margin) * (item['height'] + self.margin)
         return total
 
@@ -975,37 +987,36 @@ class ThicknessSheetLayout:
         token, index = self._next_label(base)
         return f'{token}_{index:03d}'
 
-    def _attach_layout_to_container(self,
-                                    layout_name: str,
-                                    compound: Part.Shape) -> None:
+    def _attach_layout_to_container(self) -> None:
         """Insert the packed layout into the cloned container."""
-        doc = self.doc
-        if doc is None:
+        if self.doc is None:
             fail('Document is unavailable for layout insertion', DocumentUpdateError)
+        if self._compound is None or self._layout_name is None:
+            fail('Layout data missing for insertion', DocumentUpdateError)
 
-        base_name = self._safe_label(layout_name)
+        base_name = self._safe_label(self._layout_name)
         unique_name = base_name
         suffix = 1
-        while doc.getObject(unique_name):
+        while self.doc.getObject(unique_name):
             unique_name = f'{base_name}_{suffix}'
             suffix += 1
         try:
-            obj = doc.addObject('Part::Feature', unique_name)
+            obj = self.doc.addObject('Part::Feature', unique_name)
         except Exception as exc:
             fail(
-                f"Failed to add layout '{layout_name}' to the document",
+                f"Failed to add layout '{self._layout_name}' to the document",
                 DocumentUpdateError,
                 exc
             )
 
-        obj.Shape = compound
-        obj.Label = layout_name
+        obj.Shape = self._compound
+        obj.Label = self._layout_name
         if self.container is not None and hasattr(self.container, 'addObject'):
             try:
                 self.container.addObject(obj)
             except Exception as exc:
                 fail(
-                    f"Failed to attach layout '{layout_name}' to container '{self.container.Label}'",
+                    f"Failed to attach layout '{self._layout_name}' to container '{self.container.Label}'",
                     DocumentUpdateError,
                     exc
                 )
@@ -1023,11 +1034,10 @@ class ThicknessSheetLayout:
         return token or 'Object'
 
     def _next_label(self, base_label: str) -> Tuple[str, int]:
-        doc = self.doc
         token = self._safe_label(base_label)
         prefix = f"{token}_"
         max_index = 0
-        for obj in doc.Objects:
+        for obj in self.doc.Objects:
             label = getattr(obj, 'Label', '')
             if not label.startswith(prefix):
                 continue
@@ -1178,7 +1188,7 @@ class FingerJointOrchestrator:
     def _generate_projections(self) -> None:
         if not self.clone_container or not self._cloned_parts:
             return
-        ProjectionOrchestrator(self.clone_container, self._cloned_parts).generate(self.progress)
+        ProjectionOrchestrator(self.clone_container, self._cloned_parts, self.progress).generate()
 
 
     def _set_active_container(self) -> FreeCAD.DocumentObject:
@@ -1305,19 +1315,12 @@ class FingerJointOrchestrator:
         return clone
 
     def _unique_name(self, base_label: str) -> str:
-        token = re.sub(r'[^0-9A-Za-z]+', '_', (base_label or '')).strip('_') or 'Object'
-        prefix = f"{token}_"
-        max_index = 0
-        for obj in self.doc.Objects:
-            label = getattr(obj, 'Label', '')
-            if not label.startswith(prefix):
-                continue
-            suffix = label[len(prefix):]
-            if suffix.isdigit():
-                max_index = max(max_index, int(suffix))
-        base_name = f"{token}_{(max_index + 1):03d}"
+        """Return a unique object name by appending a suffix if needed."""
+        base_name = re.sub(r'[^0-9A-Za-z]+', '_', (base_label or '')).strip('_') or 'Object'
         candidate = base_name
         suffix = 1
+        # It's critical to check for existing objects by their internal `Name`,
+        # not their `Label`, which can be changed by the user.
         while self.doc.getObject(candidate):
             candidate = f"{base_name}_{suffix}"
             suffix += 1
