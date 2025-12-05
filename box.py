@@ -1232,8 +1232,12 @@ class FingerJointOrchestrator:
             log("Dialog dismissed with no values.", 1)
             self._globals = None
 
-    def _clone_container(self, original_container: FreeCAD.DocumentObject) -> None:
+    def _clone_container(self, original_container: Optional[FreeCAD.DocumentObject] = None) -> None:
         """Create a new App::Part populated with clones from the original container."""
+        if original_container is None:
+            original_container = self.container
+        if original_container is None:
+            fail("Original container is unavailable for cloning.")
         base_label = getattr(original_container, "Label", original_container.Name)
         candidate_name = self._unique_name(base_label)
         try:
