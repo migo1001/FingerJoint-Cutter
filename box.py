@@ -296,7 +296,19 @@ class Intersection:
         new1, new2 = self.cut_fingers()
         self.part1.Shape = new1
         self.part2.Shape = new2
-        self._commit_used_space()
+        if self._pending_trimmed is not None and self._pending_trimmed.isValid():
+            if self.used_space is None or not self.used_space.isValid():
+                self.used_space = self._pending_trimmed
+            else:
+                try:
+                    self.used_space = self.used_space.fuse(self._pending_trimmed)
+                except Part.OCCError as exc:
+                    fail(
+                        "Failed to accumulate used intersection volume",
+                        IntersectionError,
+                        exc
+                    )
+        self._pending_trimmed = None
         return self.used_space
 
 
@@ -311,8 +323,18 @@ class Intersection:
             self._pending_trimmed = None
             return self.used_space
 
-        trimmed = self._trim_against_used_space(raw)
-        if trimmed is None:
+        trimmed = raw
+        if self.used_space is not None and self.used_space.isValid():
+            try:
+                trimmed = trimmed.cut(self.used_space)
+            except Part.OCCError as exc:
+                fail(
+                    "Failed to subtract already used intersection volume",
+                    IntersectionError,
+                    exc
+                )
+
+        if trimmed.Volume < GEOM_EPS or not trimmed.isValid():
             self._has_geometry = False
             self._pending_trimmed = None
             return self.used_space
@@ -343,43 +365,6 @@ class Intersection:
                 IntersectionError,
                 exc
             )
-
-    def _trim_against_used_space(self,
-                                 shape: Part.Shape) -> Optional[Part.Shape]:
-        if self.used_space is None or not self.used_space.isValid():
-            return shape
-
-        trimmed = shape.copy()
-        try:
-            trimmed = trimmed.cut(self.used_space)
-        except Part.OCCError as exc:
-            fail(
-                "Failed to subtract already used intersection volume",
-                IntersectionError,
-                exc
-            )
-
-        if trimmed.Volume < GEOM_EPS or not trimmed.isValid():
-            return None
-        return trimmed
-
-    def _commit_used_space(self) -> None:
-        """Persist the trimmed intersection into the used-space mask after cuts succeed."""
-        if self._pending_trimmed is None or not self._pending_trimmed.isValid():
-            return
-        if self.used_space is None or not self.used_space.isValid():
-            self.used_space = self._pending_trimmed
-            self._pending_trimmed = None
-            return
-        try:
-            self.used_space = self.used_space.fuse(self._pending_trimmed)
-        except Part.OCCError as exc:
-            fail(
-                "Failed to accumulate used intersection volume",
-                IntersectionError,
-                exc
-            )
-        self._pending_trimmed = None
 
     def _determine_type(self) -> None:
         if not self.shape:
