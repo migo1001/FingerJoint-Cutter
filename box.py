@@ -249,7 +249,11 @@ class IntersectionType(Enum):
 
 
 class Intersection:
-    """Analyze a pair of parts and manage the finger-cut workflow."""
+    """
+    Small helper that trims the intersection between two parts,
+    creates alternating finger boxes, applies the cuts, and returns
+    the updated used_space volume.
+    """
 
     _AXIS_VECTORS = (
         FreeCAD.Vector(1.0, 0.0, 0.0),
@@ -269,59 +273,33 @@ class Intersection:
         self.kerf = max(0.0, float(globals_.kerf))
         self.used_space = used_space
 
-        self.shape: Optional[Part.Shape] = None
-        self.volume: float = 0.0
-        self.bbox: Optional[Part.BoundBox] = None
-        self.primary_axis_idx: int = 0
-        self.longest_edge_len: float = 0.0
-        self.intersection_type: IntersectionType = IntersectionType.CROSS
-
-        self._has_geometry = False
-        self._finger_boxes: List[Part.Shape] = []
-        self._pending_trimmed: Optional[Part.Shape] = None
-
-
-    def process(self,
-                ) -> Optional[Part.Shape]:
-        """
-        Compute intersection, generate fingers, and cut parts in one step.
-        Returns updated used_space.
-        """
-        self.update_used_space()
-        if not self.is_valid():
+    def process(self) -> Optional[Part.Shape]:
+        """Compute trimmed intersection, cut alternating fingers, and update used_space."""
+        trimmed = self._trimmed_intersection()
+        if trimmed is None:
             return self.used_space
-        self.generate_fingers()
-        if not self.is_valid_fingers():
+
+        bbox = trimmed.BoundBox
+        axis, longest = self._primary_axis(bbox)
+        joint_type = self._classify_intersection(trimmed, axis)
+
+        finger_boxes = self._finger_boxes(bbox, axis, longest, joint_type)
+        if not finger_boxes:
             return self.used_space
-        new1, new2 = self.cut_fingers()
-        self.part1.Shape = new1
-        self.part2.Shape = new2
-        if self._pending_trimmed is not None and self._pending_trimmed.isValid():
-            if self.used_space is None or not self.used_space.isValid():
-                self.used_space = self._pending_trimmed
-            else:
-                try:
-                    self.used_space = self.used_space.fuse(self._pending_trimmed)
-                except Part.OCCError as exc:
-                    fail(
-                        "Failed to accumulate used intersection volume",
-                        IntersectionError,
-                        exc
-                    )
-        self._pending_trimmed = None
+
+        cut1, cut2 = self._split_cutters(finger_boxes)
+        self.part1.Shape = BooleanCutter.apply(self.part1.Shape, cut1)
+        self.part2.Shape = BooleanCutter.apply(self.part2.Shape, cut2)
+        self.used_space = self._merge_used_space(trimmed)
         return self.used_space
 
+    # --- Geometry helpers ------------------------------------------------------
 
-
-    # --- Calculation ----------------------------------------------------------
-
-    def update_used_space(self) -> Optional[Part.Shape]:
-        """Compute the trimmed intersection; used-space is updated only after successful cuts."""
+    def _trimmed_intersection(self) -> Optional[Part.Shape]:
+        """Return the pairwise intersection minus any already-used volume."""
         raw = self._pairwise_common()
         if raw is None or not raw.isValid() or raw.Volume < GEOM_EPS:
-            self._has_geometry = False
-            self._pending_trimmed = None
-            return self.used_space
+            return None
 
         trimmed = raw
         if self.used_space is not None and self.used_space.isValid():
@@ -334,27 +312,9 @@ class Intersection:
                     exc
                 )
 
-        if trimmed.Volume < GEOM_EPS or not trimmed.isValid():
-            self._has_geometry = False
-            self._pending_trimmed = None
-            return self.used_space
-
-        self._populate_from_shape(trimmed)
-        self._has_geometry = True
-        self._pending_trimmed = trimmed
-        return self.used_space
-
-    def is_valid(self) -> bool:
-        return self._has_geometry
-
-    def _populate_from_shape(self, shape: Part.Shape) -> None:
-        self.shape = shape
-        self.volume = float(shape.Volume)
-        self.bbox = shape.BoundBox
-        dims = [self.bbox.XLength, self.bbox.YLength, self.bbox.ZLength]
-        self.primary_axis_idx = self._dominant_axis_index(dims)
-        self.longest_edge_len = float(dims[self.primary_axis_idx])
-        self._determine_type()
+        if not trimmed.isValid() or trimmed.Volume < GEOM_EPS:
+            return None
+        return trimmed
 
     def _pairwise_common(self) -> Optional[Part.Shape]:
         try:
@@ -366,35 +326,47 @@ class Intersection:
                 exc
             )
 
-    def _determine_type(self) -> None:
-        if not self.shape:
-            return
-        main_axis_vec = self._axis_vector(self.primary_axis_idx)
+    @staticmethod
+    def _primary_axis(bbox: FreeCAD.BoundBox) -> Tuple[int, float]:
+        """Return the axis index and length of the dominant dimension."""
+        dimensions = [bbox.XLength, bbox.YLength, bbox.ZLength]
+        index = max(range(3), key=lambda idx: dimensions[idx])
+        return index, float(dimensions[index])
+
+    # --- Classification --------------------------------------------------------
+
+    def _classify_intersection(self, shape: Part.Shape, axis_idx: int) -> IntersectionType:
+        """
+        Heuristic classification based on which part owns the edges aligned
+        with the dominant axis. Keeps the same three buckets as before but in
+        fewer moving parts.
+        """
+        axis_vec = self._axis_vector(axis_idx)
         face_contact = False
-        for edge in self.shape.Edges:
+        for edge in shape.Edges:
             if edge.Length < GEOM_EPS:
                 continue
             v0 = edge.Vertexes[0].Point
             v1 = edge.Vertexes[1].Point
             direction = self._vec_normalized(v1 - v0)
-            aligned = direction.isEqual(main_axis_vec, GEOM_EPS) or direction.isEqual(-main_axis_vec, GEOM_EPS)
+            aligned = direction.isEqual(axis_vec, GEOM_EPS) or direction.isEqual(-axis_vec, GEOM_EPS)
             if not aligned:
                 continue
-            on_p1 = any(self._colinear(edge, candidate) for candidate in self.part1.Shape.Edges)
-            on_p2 = any(self._colinear(edge, candidate) for candidate in self.part2.Shape.Edges)
+            on_p1 = self._edge_on_part(edge, self.part1)
+            on_p2 = self._edge_on_part(edge, self.part2)
             if on_p1 and on_p2:
-                self.intersection_type = IntersectionType.CORNER
-                return
+                return IntersectionType.CORNER
             if on_p1 or on_p2:
                 face_contact = True
-        self.intersection_type = IntersectionType.FACE if face_contact else IntersectionType.CROSS
+        return IntersectionType.FACE if face_contact else IntersectionType.CROSS
+
+    def _edge_on_part(self, edge: Part.Edge, part: FreeCAD.DocumentObject) -> bool:
+        """Return True if the edge is colinear with any edge on the part."""
+        return any(self._colinear(edge, candidate) for candidate in part.Shape.Edges)
 
     def _colinear(self, edge_a: Part.Edge, edge_b: Part.Edge) -> bool:
         if len(edge_a.Vertexes) < 2 or len(edge_b.Vertexes) < 2:
-            fail(
-                "Edges missing vertex data for colinearity test",
-                IntersectionError
-            )
+            fail("Edges missing vertex data for colinearity test", IntersectionError)
         p1a, p1b = edge_a.Vertexes[0].Point, edge_a.Vertexes[1].Point
         p2a, p2b = edge_b.Vertexes[0].Point, edge_b.Vertexes[1].Point
         if (p1b - p1a).Length < GEOM_EPS or (p2b - p2a).Length < GEOM_EPS:
@@ -403,58 +375,42 @@ class Intersection:
         return (p2a - p1a).cross(direction).Length < GEOM_EPS and \
                (p2b - p1a).cross(direction).Length < GEOM_EPS
 
-    @staticmethod
-    def _dominant_axis_index(dimensions: List[float]) -> int:
-        index = 0
-        max_length = dimensions[0]
-        if dimensions[1] > max_length:
-            index = 1
-            max_length = dimensions[1]
-        if dimensions[2] > max_length:
-            index = 2
-        return index
+    # --- Finger generation -----------------------------------------------------
 
-    # --- Finger box generation -------------------------------------------------
-
-    def generate_fingers(self) -> None:
-        """Create finger boxes once geometry is available."""
-        if not self._has_geometry or not self.bbox:
-            self._finger_boxes = []
-            return
-        self._finger_boxes = self._create_finger_boxes()
-
-    def is_valid_fingers(self) -> bool:
-        return bool(self._finger_boxes)
-        
-
-    def _create_finger_boxes(self) -> List[Part.Shape]:
-        if not self.bbox or self.longest_edge_len <= GEOM_EPS:
+    def _finger_boxes(self,
+                      bbox: FreeCAD.BoundBox,
+                      axis_idx: int,
+                      longest_edge: float,
+                      joint_type: IntersectionType) -> List[Part.Shape]:
+        if longest_edge <= GEOM_EPS:
             return []
-        finger_count = self._finger_count()
+
+        finger_count = self._finger_count(longest_edge, joint_type)
         if finger_count <= 0:
             return []
-        segment_length = self.longest_edge_len / float(finger_count)
+
+        segment_length = longest_edge / float(finger_count)
         half_kerf = self.kerf * 0.5
         boxes: List[Part.Shape] = []
         for index in range(finger_count):
             start, length = self._segment_with_kerf(segment_length, index, finger_count, half_kerf)
             if length <= GEOM_EPS:
                 continue
-            base = self._segment_base(start)
-            size = self._segment_size(length)
+            base = self._segment_base(bbox, axis_idx, start)
+            size = self._segment_size(bbox, axis_idx, length)
             boxes.append(Part.makeBox(size[0], size[1], size[2], base))
         return boxes
 
-    def _finger_count(self) -> int:
-        if self.intersection_type == IntersectionType.CROSS:
+    def _finger_count(self, longest_edge: float, joint_type: IntersectionType) -> int:
+        if joint_type == IntersectionType.CROSS:
             return CROSS_JOINT_FINGER_COUNT
         minimum_length = max(1.0, self.finger_length)
-        max_fingers = int(self.longest_edge_len / minimum_length)
+        max_fingers = int(longest_edge / minimum_length)
         candidate = max_fingers if max_fingers % 2 == 1 else max_fingers - 1
         if candidate >= MIN_FINGER_COUNT:
             return candidate
         fallback = MIN_FINGER_COUNT
-        actual = self.longest_edge_len / float(fallback)
+        actual = longest_edge / float(fallback)
         if actual + GEOM_EPS < minimum_length:
             part_label_1 = getattr(self.part1, "Label", self.part1.Name)
             part_label_2 = getattr(self.part2, "Label", self.part2.Name)
@@ -479,39 +435,42 @@ class Intersection:
             length -= half_kerf
         return start, length
 
-    def _segment_base(self, start: float) -> FreeCAD.Vector:
-        x0, y0, z0 = self.bbox.XMin, self.bbox.YMin, self.bbox.ZMin
-        axis = self.primary_axis_idx
-        if axis == 0:
+    def _segment_base(self, bbox: FreeCAD.BoundBox, axis_idx: int, start: float) -> FreeCAD.Vector:
+        x0, y0, z0 = bbox.XMin, bbox.YMin, bbox.ZMin
+        if axis_idx == 0:
             return FreeCAD.Vector(x0 + start, y0, z0)
-        if axis == 1:
+        if axis_idx == 1:
             return FreeCAD.Vector(x0, y0 + start, z0)
         return FreeCAD.Vector(x0, y0, z0 + start)
 
-    def _segment_size(self, length: float) -> Tuple[float, float, float]:
-        dx, dy, dz = self.bbox.XLength, self.bbox.YLength, self.bbox.ZLength
-        axis = self.primary_axis_idx
-        if axis == 0:
+    def _segment_size(self, bbox: FreeCAD.BoundBox, axis_idx: int, length: float) -> Tuple[float, float, float]:
+        dx, dy, dz = bbox.XLength, bbox.YLength, bbox.ZLength
+        if axis_idx == 0:
             return length, dy, dz
-        if axis == 1:
+        if axis_idx == 1:
             return dx, length, dz
         return dx, dy, length
 
     # --- Cutting ---------------------------------------------------------------
 
-    def cut_fingers(self) -> Tuple[Part.Shape, Part.Shape]:
-        """Apply the precomputed finger boxes to the supplied shapes."""
-        if not self._finger_boxes:
-            return self.part1.Shape, self.part2.Shape
-        cut1, cut2 = self._split_cutters()
-        new1 = BooleanCutter.apply(self.part1.Shape, cut1)
-        new2 = BooleanCutter.apply(self.part2.Shape, cut2)
-        return new1, new2
-
-    def _split_cutters(self) -> Tuple[Part.Compound, Part.Compound]:
-        cut1 = Part.Compound([self._finger_boxes[i] for i in range(1, len(self._finger_boxes), 2)])
-        cut2 = Part.Compound([self._finger_boxes[i] for i in range(0, len(self._finger_boxes), 2)])
+    def _split_cutters(self, finger_boxes: List[Part.Shape]) -> Tuple[Part.Compound, Part.Compound]:
+        cut1 = Part.Compound([finger_boxes[i] for i in range(1, len(finger_boxes), 2)])
+        cut2 = Part.Compound([finger_boxes[i] for i in range(0, len(finger_boxes), 2)])
         return cut1, cut2
+
+    def _merge_used_space(self, trimmed: Part.Shape) -> Optional[Part.Shape]:
+        if trimmed is None or not trimmed.isValid():
+            return self.used_space
+        if self.used_space is None or not self.used_space.isValid():
+            return trimmed
+        try:
+            return self.used_space.fuse(trimmed)
+        except Part.OCCError as exc:
+            fail(
+                "Failed to accumulate used intersection volume",
+                IntersectionError,
+                exc
+            )
 
     @staticmethod
     def _axis_vector(index: int) -> FreeCAD.Vector:
